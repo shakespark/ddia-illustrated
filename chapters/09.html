@@ -1,0 +1,728 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 9 章 · 分布式系统的麻烦 · DDIA 导读</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/chapters.js"></script>
+<script src="../assets/sections.js"></script>
+<script src="../assets/dd.js"></script>
+<style>
+#sim-09 .stage .lane { flex-wrap: nowrap; width: max-content; }
+#sim-09 .stage .lane > .lbl { flex: none; min-width: 5em; align-self: stretch; display: flex; align-items: center; position: sticky; left: -12px; z-index: 1; background: var(--bg); padding: 0 6px 0 4px; }
+#sim-09 .stage .cell { flex: none; width: 36px; min-width: 36px; padding: 0; font-size: 12px; }
+#sim-09 .stage .cell.hd { border-color: transparent; background: transparent; color: var(--muted); }
+#sim-09 .stage .cell.hd.on { color: var(--accent); font-weight: 700; }
+#sim-09 .stage .cell.idle { color: var(--faint); }
+#sim-09 .stage .cell.wait { border-color: var(--warn); background: var(--warn-soft); }
+</style>
+</head>
+<body data-chapter="9">
+<main>
+
+<h2>这一章在做什么</h2>
+<div class="gist"><p>一台机器上的程序要么正常，要么整个崩掉；几台机器用网络连起来，就会出现一部分坏、其余照常的「部分失效」，而且常常说不清坏的是哪部分。这一章只摆问题：网络会丢包、会无限期延迟，检测故障只能靠超时；时钟会漂、会跳，拿它给事件排先后很危险；进程随时可能停顿几十秒，醒来还以为什么都没发生。后半讲在这种条件下怎样推理：让多数派替单个节点做判断，用防护令牌挡住过期的持锁者，用系统模型把假设写清楚。</p></div>
+<figure class="fig"><img src="../assets/img/09-switch-rack.jpg" alt="一个 19 英寸机柜，上面几排是配线架，下面是两台以太网交换机，几十根灰色网线成束地绕在理线架上" loading="lazy">
+<figcaption>机柜里的两台千兆以太网交换机和配线架。几台机器同时往同一个端口发包时，包就在交换机的队列里排队，排满了就丢掉。这一章说的「延迟没有上限」，很大一部分就是这里和对方操作系统里的排队（§2.4）。<span class="src">Dsimic，CC BY-SA 4.0，维基共享资源</span></figcaption></figure>
+
+<h2>读之前：先预测</h2>
+<p>第 6 章讲复制时留了几个尾巴：故障转移要靠超时判断主节点死没死，两个节点可能都以为自己是主（脑裂），「最后写入者胜」会悄悄丢掉写入。原因都要到这一章才摆出来：网络、时钟、进程停顿。第 8 章的快照隔离要一个单调递增的事务 ID，这一章讲能不能拿同步过的时钟来当它。下一章（第 10 章）开始讲解法：线性一致性、逻辑时钟和共识。书里说，共识算法里的选票号（Paxos）、任期号（Raft）和这一章的防护令牌起的作用类似。</p>
+
+<div class="bet" data-key="09-a">
+  <div class="q">一个导出服务用租约保证同一时刻只有一个实例往对象存储里写当天的对账文件。租约 20 秒，实例 A 每隔几秒看一眼租约还剩多久，不够就续。某次 A 刚看完（还剩 18 秒），紧接着碰上一次 25 秒的垃圾回收停顿。A 醒来之后最可能发生什么？</div>
+  <div class="opts">
+    <button>A 发现系统时间跳了 25 秒，知道自己停过，先重新检查租约再写</button>
+    <button>锁服务在租约到期时通知了 A，A 的客户端库会拦下这次写</button>
+    <button>A 接着把停顿前要做的写做完；这时实例 B 已经拿到租约在写，两边的写搅在一起，文件被写坏</button>
+    <button>对象存储知道 A 的租约过期了，拒绝它的写</button>
+    <button>什么都不会发生：18 秒的余量足够</button>
+  </div>
+  <textarea class="note" data-key="09-a-bet" placeholder="你为什么这么猜？一两句就行"></textarea>
+</div>
+
+<div class="bet" data-key="09-b">
+  <div class="q">一个多主复制的键值库用「最后写入者胜」（LWW）解决冲突，时间戳取写入所在节点的系统时钟。节点 P 的时钟比真实时间快 80 毫秒，节点 Q 的时钟是准的。用户先在 P 上把收货地址改成「东门」，30 毫秒后又在 Q 上改成「西门」。两次写都复制到所有节点之后，地址是什么？</div>
+  <div class="opts">
+    <button>西门：它是真正后发生的那次写</button>
+    <button>东门：P 打的时间戳更大，「西门」这次写被悄悄丢掉，没有任何报错</button>
+    <button>两个值都留着，等应用来合并</button>
+    <button>数据库发现时间戳反常，拒绝第二次写并报错</button>
+    <button>看复制到达的先后：哪个后到就是哪个</button>
+  </div>
+  <textarea class="note" data-key="09-b-bet" placeholder="你为什么这么猜？"></textarea>
+</div>
+
+<div class="crux"><p>一个节点只能靠收到（或没收到）的消息去猜别的节点的状态，连「现在几点」「我是不是还被当成活着」都没法确知。在这样的条件下，系统怎样保证不做错事？</p></div>
+<ol class="qs">
+  <li>发出请求迟迟没有回音，可能是哪几种情况？为什么超时设多长没有「正确答案」？<span class="sec">§2</span><span class="sec">§2.4</span></li>
+  <li>两种时钟各适合回答什么问题？拿时间戳给不同节点上的写排先后，危险在哪？<span class="sec">§3.1</span><span class="sec">§3.3</span></li>
+  <li>持租约的节点停了几十秒，醒来接着写。谁能挡住它，凭什么？<span class="sec">§3.4</span><span class="sec">§4.2</span></li>
+  <li>安全性和活性有什么区别？为什么分布式算法对前者要求得更严？<span class="sec">§4.4</span></li>
+</ol>
+
+<h2>这一章的骨架</h2>
+<p>这一章前半是一份「坏事清单」，按三种不可靠排：网络（§2）、时钟（§3.1–3.3）、进程停顿（§3.4）。§4 换了个角度：既然什么都靠不住，一个节点能「知道」什么、该信谁。容易乱的是租约的例子：它在 §3.4 开头出场（停顿怎么让租约失效），到 §4.2 才接着讲怎么防。读 §4.2 之前，回头看一眼 §3.4 的开头。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 392" role="img" aria-label="这一章的骨架：网络、时钟、进程三种不可靠各列出要点和节号，汇到「节点什么都不能确知」，再分出多数派、租约与防护令牌、拜占庭故障、系统模型四个思考工具，最下面是验证手段">
+  <defs><marker id="a9s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <rect class="b-a" x="10" y="10" width="200" height="36" rx="6"/>
+  <text class="t-b" x="110" y="33" text-anchor="middle">网络：丢、慢、说不清 §2</text>
+  <rect class="b-a" x="220" y="10" width="200" height="36" rx="6"/>
+  <text class="t-b" x="320" y="33" text-anchor="middle">时钟：会漂、会跳 §3.1–3.3</text>
+  <rect class="b-a" x="430" y="10" width="200" height="36" rx="6"/>
+  <text class="t-b" x="530" y="33" text-anchor="middle">进程：随时会停 §3.4</text>
+  <rect class="box" x="10" y="56" width="200" height="30" rx="5"/>
+  <text x="110" y="76" text-anchor="middle">只能靠超时 §2.3–2.4</text>
+  <rect class="box" x="10" y="92" width="200" height="30" rx="5"/>
+  <text x="110" y="112" text-anchor="middle">要硬上界？电路交换，贵 §2.5</text>
+  <rect class="box" x="220" y="56" width="200" height="30" rx="5"/>
+  <text x="320" y="76" text-anchor="middle">测时长用单调时钟 §3.1</text>
+  <rect class="box" x="220" y="92" width="200" height="30" rx="5"/>
+  <text x="320" y="112" text-anchor="middle">时间戳排先后会丢写 §3.3</text>
+  <rect class="box" x="220" y="128" width="200" height="30" rx="5"/>
+  <text x="320" y="148" text-anchor="middle">读数是个区间 §3.3</text>
+  <rect class="box" x="430" y="56" width="200" height="30" rx="5"/>
+  <text x="530" y="76" text-anchor="middle">GC、挂起、换页、I/O §3.4</text>
+  <rect class="box" x="430" y="92" width="200" height="30" rx="5"/>
+  <text x="530" y="112" text-anchor="middle">实时系统能保证，贵 §3.4</text>
+  <path class="ln" d="M110 124 L250 186" marker-end="url(#a9s)"/>
+  <path class="ln" d="M320 160 V186" marker-end="url(#a9s)"/>
+  <path class="ln" d="M530 124 L390 186" marker-end="url(#a9s)"/>
+  <rect class="b-warn" x="120" y="190" width="400" height="36" rx="6"/>
+  <text class="t-b" x="320" y="213" text-anchor="middle">节点什么都不能确知，只能靠消息猜 §4</text>
+  <path class="ln" d="M320 226 V240 M83 240 H557 M83 240 V256 M241 240 V256 M399 240 V256 M557 240 V256"/>
+  <rect class="box" x="10" y="256" width="146" height="48" rx="6"/>
+  <text x="83" y="276" text-anchor="middle">多数派说了算</text>
+  <text class="t-m" x="83" y="295" text-anchor="middle">§4.1</text>
+  <rect class="box" x="168" y="256" width="146" height="48" rx="6"/>
+  <text x="241" y="276" text-anchor="middle">租约 + 防护令牌</text>
+  <text class="t-m" x="241" y="295" text-anchor="middle">§4.2</text>
+  <rect class="box" x="326" y="256" width="146" height="48" rx="6"/>
+  <text x="399" y="276" text-anchor="middle">拜占庭：会撒谎吗</text>
+  <text class="t-m" x="399" y="295" text-anchor="middle">§4.3</text>
+  <rect class="box" x="484" y="256" width="146" height="48" rx="6"/>
+  <text x="557" y="276" text-anchor="middle">系统模型、安全与活性</text>
+  <text class="t-m" x="557" y="295" text-anchor="middle">§4.4</text>
+  <path class="ln-d" d="M320 304 V322"/>
+  <rect class="b-ok" x="10" y="322" width="620" height="34" rx="6"/>
+  <text x="320" y="344" text-anchor="middle">怎么确认算法和实现没错：模型检查、故障注入、确定性模拟测试 §4.5</text>
+  <text class="t-m" x="10" y="382">上半是「坏事清单」，下半是这一章给的思考工具；真正的解法（共识）在第 10 章。</text>
+</svg>
+<figcaption>本站画的全章结构。§2.5 和 §3.4 后半各有一段「能不能干脆从硬件上解决」的岔路，答案都是能，但贵。</figcaption>
+</figure>
+<p class="lede">边读边填：每行一个问题，读到答案就写一两句。只存在你这台设备的浏览器里，别人看不到。</p>
+<div class="table-wrap"><table class="findit">
+  <tr><th>要找的</th><th>带着这个问题读，找到了就写下来</th></tr>
+  <tr><td>超时的取舍</td><td><p class="q">超时设短了、设长了各付什么代价？延迟没有上界时，书里建议怎么定？<span class="sec">§2.4</span></p><input class="note" data-key="09-f1" aria-label="超时的取舍：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>电话网的保证</td><td><p class="q">电话网凭什么能保证延迟有上界？数据中心为什么不这么做？<span class="sec">§2.5</span></p><input class="note" data-key="09-f2" aria-label="电话网的保证：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>两种时钟</td><td><p class="q">测一个请求花了多久，该用哪种时钟？另一种为什么不行？<span class="sec">§3.1</span></p><input class="note" data-key="09-f3" aria-label="两种时钟：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>LWW 丢写</td><td><p class="q">时钟慢的节点写进去的值，为什么会被悄悄丢掉？<span class="sec">§3.3</span></p><input class="note" data-key="09-f4" aria-label="LWW 丢写：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>Spanner 在等什么</td><td><p class="q">提交读写事务之前它故意等多久？这个时长由什么决定？<span class="sec">§3.3</span></p><input class="note" data-key="09-f5" aria-label="Spanner 在等什么：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>令牌由谁检查</td><td><p class="q">防护令牌由谁来检查？存储不认令牌时还有什么办法？<span class="sec">§4.2</span></p><input class="note" data-key="09-f6" aria-label="令牌由谁检查：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>现实用哪种模型</td><td><p class="q">对真实系统建模，书里认为哪种时间假设加哪种故障假设最有用？<span class="sec">§4.4</span></p><input class="note" data-key="09-f7" aria-label="现实用哪种模型：你的答案" placeholder="你的答案"></td></tr>
+</table></div>
+<details class="reveal"><summary>读完了？对照我找到的</summary><ul>
+  <li>超时的取舍：短了会把只是慢一下的节点判死，转移负载可能引发连锁故障；长了真挂了要等很久。只能长期测往返时间的分布来定，或按观测到的抖动自动调（如 Phi Accrual）。</li>
+  <li>电话网的保证：建立通话时沿路预留固定带宽（电路），不用排队；数据中心的流量是突发的，按需共享利用率高、便宜，代价是排队。</li>
+  <li>两种时钟：单调时钟，只往前走，差值就是经过的时间；日历时钟可能被 NTP 强行拨回或拨快，算出来的时长可能是负的。</li>
+  <li>LWW 丢写：它打的时间戳比时钟快的节点之前写的值还小，在两边的时钟差走完之前都覆盖不了，而且不报错。</li>
+  <li>Spanner 在等什么：等一个置信区间的宽度，让以后读到这份数据的事务的区间和它不重叠；GPS 和原子钟把区间压到约 7 毫秒。</li>
+  <li>令牌由谁检查：存储服务，记住处理过的最大令牌，拒绝更小的；也可以用条件写（类似 CAS）代替。</li>
+  <li>现实用哪种模型：部分同步加崩溃-恢复。</li>
+</ul></details>
+
+<h2>分节地图</h2>
+<p class="lede">全章约 1.8 万词（不算代码和图注），建议分四次读。第一次全是网络，读着顺；第二次的 §3.3 是时钟部分的重心；第三次从进程停顿一路读到防护令牌，中间别断；第四次偏理论，§4.4 的几个定义值得慢读。</p>
+<ol class="secmap">
+  <li class="sit">第一次坐下<span>§0–§2.5 · 约 5300 词 · 部分失效和不可靠的网络</span></li>
+  <li data-sec="0"><b>As discussed in “Reliability and Fault Tolerance”…<span class="w">约 300 词</span></b><span class="cn">开篇</span><span class="what">为什么要把悲观调到最大；全章的路线：网络、时钟，再到怎样推理。</span></li>
+  <li data-sec="1"><b>Faults and Partial Failures<span class="w">约 600 词</span></b><span class="cn">故障与部分失效</span><span class="what">单机为什么被设计成「要么好、要么全坏」，多台机器为什么做不到。</span></li>
+  <li data-sec="2"><b>Unreliable Networks<span class="w">约 500 词</span></b><span class="cn">不可靠的网络</span><span class="what">发出请求没有回音，可能是哪几种情况，为什么分不清。</span></li>
+  <li data-sec="2.1"><b>The Limitations of TCP<span class="w">约 600 词</span></b><span class="cn">TCP 的局限</span><span class="what">TCP 说的「可靠」可靠到哪一步，哪些事它管不了。</span></li>
+  <li data-sec="2.2"><b>Network Faults in Practice<span class="w">约 500 词</span></b><span class="cn">现实中的网络故障</span><span class="what">几项研究和一串轶事：网络故障有多常见、多古怪。方框区分网络分区和分片。</span></li>
+  <li data-sec="2.3"><b>Fault Detection<span class="w">约 400 词</span></b><span class="cn">故障检测</span><span class="what">什么时候能拿到明确的「它挂了」，大多数时候为什么拿不到。</span></li>
+  <li data-sec="2.4"><b>Timeouts and Unbounded Delays<span class="w">约 1100 词</span></b><span class="cn">超时与没有上限的延迟</span><span class="what">超时设多长；延迟的波动从哪几处排队里来；超时为什么只能靠测。</span></li>
+  <li data-sec="2.5"><b>Synchronous Versus Asynchronous Networks<span class="w">约 1200 词</span></b><span class="cn">同步网络与异步网络</span><span class="what">电话网能保证延迟，数据中心为什么不学它。抓住方框里「利用率」那条线。</span></li>
+  <li class="sit">第二次坐下<span>§3–§3.3 · 约 3700 词 · 不可靠的时钟</span></li>
+  <li data-sec="3"><b>Unreliable Clocks<span class="w">约 300 词</span></b><span class="cn">不可靠的时钟</span><span class="what">应用拿时钟回答两类问题：一段时长，和一个时间点。</span></li>
+  <li data-sec="3.1"><b>Monotonic Versus Time-of-Day Clocks<span class="w">约 600 词</span></b><span class="cn">单调时钟与日历时钟</span><span class="what">两种时钟各保证什么、不保证什么，各适合做什么。</span></li>
+  <li data-sec="3.2"><b>Clock Synchronization and Accuracy<span class="w">约 800 词</span></b><span class="cn">时钟同步与精度</span><span class="what">一串让时钟出错的原因：漂移、NTP、闰秒、虚拟机、用户自己改时间。</span></li>
+  <li data-sec="3.3"><b>Relying on Synchronized Clocks<span class="w">约 2000 词</span></b><span class="cn">依赖同步的时钟</span><span class="what">用时间戳排先后会出什么事；读数为什么该看成区间；Spanner 怎么用这个区间。</span></li>
+  <li class="sit">第三次坐下<span>§3.4–§4.2 · 约 4200 词 · 停顿、多数派、租约和防护令牌</span></li>
+  <li data-sec="3.4"><b>Process Pauses<span class="w">约 1900 词</span></b><span class="cn">进程停顿</span><span class="what">持租约的主节点停顿会怎样；停顿从哪来；实时系统和减轻 GC 停顿的办法。</span></li>
+  <li data-sec="4"><b>Knowledge, Truth, and Lies<span class="w">约 400 词</span></b><span class="cn">知识、真相与谎言</span><span class="what">节点只能靠消息去猜别人的状态。引出「系统模型」这个词。</span></li>
+  <li data-sec="4.1"><b>The Majority Rules<span class="w">约 500 词</span></b><span class="cn">多数说了算</span><span class="what">一个节点为什么不能信自己的判断；多数派为什么安全。</span></li>
+  <li data-sec="4.2"><b>Distributed Locks and Leases<span class="w">约 1400 词</span></b><span class="cn">分布式锁与租约</span><span class="what">两个客户端同时以为自己持锁怎么办：防护令牌，以及它在多副本上的用法。</span></li>
+  <li class="sit">第四次坐下<span>§4.3–§5 · 约 5100 词 · 撒谎的节点、系统模型、怎么验证</span></li>
+  <li data-sec="4.3"><b>Byzantine Faults<span class="w">约 1200 词</span></b><span class="cn">拜占庭故障</span><span class="what">节点会撒谎时难在哪；什么场合才需要防，本书为什么默认不防。</span></li>
+  <li data-sec="4.4"><b>System Model and Reality<span class="w">约 1600 词</span></b><span class="cn">系统模型与现实</span><span class="what">时间和故障各有几种假设；安全性与活性；模型和现实对不上时怎么办。</span></li>
+  <li data-sec="4.5"><b>Formal Methods and Randomized Testing<span class="w">约 1600 词</span></b><span class="cn">形式化方法与随机化测试</span><span class="what">模型检查、故障注入、确定性模拟测试，各测什么、各有什么盲区。</span></li>
+  <li data-sec="5"><b>Summary<span class="w">约 700 词</span></b><span class="cn">小结</span><span class="what">全章回顾。先自己回忆一遍再读它。</span></li>
+</ol>
+
+<h2>先用中文过一遍</h2>
+<h3>没有回音：发生了什么，只能猜</h3>
+<p>你给另一台机器发了一个请求，迟迟没有回音。毛病可能出在三个地方。回来的路上：对方其实已经处理完了，回应丢了或者堵在半路，这时请求已经生效，你却不知道。对方那边：进程崩了，或者正卡在一次很长的垃圾回收里，过一会儿还会回话。去的路上：请求丢了，或者还在某个交换机的队列里排着，晚些照样会送到。从发送方这一头看，这些情况一模一样：只有「还没收到」。用了 TCP 也一样，TCP 的确认只说明对方的内核收到了数据，不说明对方的程序处理了它。</p>
+<p>唯一普遍可用的办法是超时：等够一段时间，就当它挂了。难处在于这种网络的延迟没有上限。包要在交换机里排队，在对方的操作系统里排队，在虚拟机监视器里排队，TCP 自己还会为了不压垮网络在发送端排队；负载越接近满，队排得越长。所以往返时间的分布拖着一条长尾巴，超时线画在哪都是取舍：画得靠左，偶尔慢一下的活节点会被判死，它的活转给别人，可能把本来就忙的系统压垮；画得靠右，真挂了要等很久才发现。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 286" role="img" aria-label="往返时间的分布：大多数往返很快，集中在左边；右边拖着一条很长的尾巴。短超时线右边的活节点会被误判死亡，长超时线意味着真挂了也要等很久才发现">
+  <path class="ln" d="M50 30 V210 H624"/>
+  <text class="t-m" x="624" y="246" text-anchor="end">往返时间（对数刻度）</text>
+  <text class="t-m" x="80" y="226" text-anchor="middle">1 ms</text>
+  <text class="t-m" x="230" y="226" text-anchor="middle">10 ms</text>
+  <text class="t-m" x="380" y="226" text-anchor="middle">100 ms</text>
+  <text class="t-m" x="530" y="226" text-anchor="middle">1 s</text>
+  <text class="t-m" x="44" y="40" text-anchor="end">多</text>
+  <text class="t-m" x="44" y="208" text-anchor="end">少</text>
+  <rect class="b-a" x="60" y="200" width="14" height="10"/>
+  <rect class="b-a" x="78" y="170" width="14" height="40"/>
+  <rect class="b-a" x="96" y="100" width="14" height="110"/>
+  <rect class="b-a" x="114" y="50" width="14" height="160"/>
+  <rect class="b-a" x="132" y="60" width="14" height="150"/>
+  <rect class="b-a" x="150" y="105" width="14" height="105"/>
+  <rect class="b-a" x="168" y="140" width="14" height="70"/>
+  <rect class="b-a" x="186" y="162" width="14" height="48"/>
+  <rect class="b-a" x="204" y="176" width="14" height="34"/>
+  <rect class="b-a" x="222" y="184" width="14" height="26"/>
+  <rect class="b-a" x="240" y="190" width="14" height="20"/>
+  <rect class="b-a" x="258" y="194" width="14" height="16"/>
+  <rect class="b-a" x="276" y="197" width="14" height="13"/>
+  <rect class="b-a" x="294" y="199" width="14" height="11"/>
+  <rect class="b-a" x="312" y="201" width="14" height="9"/>
+  <rect class="b-a" x="330" y="202" width="14" height="8"/>
+  <rect class="b-a" x="348" y="203" width="14" height="7"/>
+  <rect class="b-a" x="366" y="204" width="14" height="6"/>
+  <rect class="b-a" x="384" y="205" width="14" height="5"/>
+  <rect class="b-a" x="402" y="205" width="14" height="5"/>
+  <rect class="b-a" x="420" y="206" width="14" height="4"/>
+  <rect class="b-a" x="438" y="206" width="14" height="4"/>
+  <rect class="b-a" x="456" y="207" width="14" height="3"/>
+  <rect class="b-a" x="474" y="207" width="14" height="3"/>
+  <rect class="b-a" x="492" y="207" width="14" height="3"/>
+  <rect class="b-a" x="510" y="208" width="14" height="2"/>
+  <rect class="b-a" x="528" y="208" width="14" height="2"/>
+  <rect class="b-a" x="546" y="208" width="14" height="2"/>
+  <rect class="b-a" x="564" y="208" width="14" height="2"/>
+  <rect class="b-a" x="582" y="208" width="14" height="2"/>
+  <text class="t-m" x="60" y="24">大多数往返很快</text>
+  <path class="ln-bad" d="M206 40 V210"/>
+  <text class="t-bad" x="214" y="56">短超时：线右边的活节点</text>
+  <text class="t-bad" x="214" y="74">只是慢了一下，也会被判死</text>
+  <path class="ln-a" d="M500 40 V210"/>
+  <text class="t-a" x="508" y="104">长超时：</text>
+  <text class="t-a" x="508" y="122">真挂了也要等</text>
+  <text class="t-a" x="508" y="140">这么久才发现</text>
+  <text class="t-m" x="50" y="270">尾巴没有尽头：超时画在哪里，都可能有活节点的回应比它更慢。</text>
+</svg>
+<figcaption>本站画的示意图，形状是编的，只为说明长尾。真实的分布要在你自己的机器上长期测，负载越高尾巴越长。</figcaption>
+</figure>
+
+<h3>两种时钟，和一件不该交给时钟的事</h3>
+<p>每台机器上都有一块石英晶体在计时，它会随温度快一点、慢一点，叫漂移。机器靠 NTP 定期向时间服务器对表，对表的精度又受网络延迟所限。程序能读到两种时钟：日历时钟（time-of-day clock）告诉你现在几月几号几点，和 NTP 对齐，但可能被一下子拨回去或拨过去；单调时钟（monotonic clock）只保证一直往前走，绝对值没有意义，两次读数的差就是经过的时间。测超时、测耗时用单调时钟；要和别的机器比时间，只能用日历时钟，也就得接受它的误差。</p>
+<p>危险在于拿日历时钟给不同节点上的事件排先后。比如「最后写入者胜」（LWW）：同一个键有两个版本，留时间戳大的那个。只要两个节点的时钟差比两次写的间隔还大，真正后发生的写就会因为时间戳小而被扔掉，而且不报任何错。更老实的看法是承认读数有误差：把「现在」看成一个区间 [最早, 最晚]。两个区间不重叠，先后就确定了；重叠了就说不准。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 252" role="img" aria-label="三个事务的时间戳都是区间：甲和乙的区间不重叠，乙一定在甲之后；乙和丙的区间重叠，说不准谁先谁后">
+  <text class="t-b" x="10" y="22">每个读数是一个区间 [最早, 最晚]（单位随便取）</text>
+  <rect class="b-a" x="60" y="44" width="140" height="28" rx="5"/>
+  <text class="t-mono" x="130" y="63" text-anchor="middle">甲 [120, 127]</text>
+  <rect class="b-a" x="280" y="84" width="140" height="28" rx="5"/>
+  <text class="t-mono" x="350" y="103" text-anchor="middle">乙 [131, 138]</text>
+  <rect class="b-a" x="380" y="124" width="140" height="28" rx="5"/>
+  <text class="t-mono" x="450" y="143" text-anchor="middle">丙 [136, 143]</text>
+  <path class="ln-d" d="M200 72 V196 M280 112 V196 M380 152 V196 M420 112 V124 M420 152 V196"/>
+  <path class="ln-ok" d="M200 186 H280"/>
+  <path class="ln-bad" d="M380 186 H420"/>
+  <path class="ln" d="M30 196 H620"/>
+  <text class="t-m" x="620" y="214" text-anchor="end">真实时间 →</text>
+  <text class="t-ok" x="240" y="216" text-anchor="middle">不重叠：乙一定在甲之后</text>
+  <text class="t-bad" x="400" y="216" text-anchor="middle">重叠：说不准谁先</text>
+  <text class="t-m" x="10" y="242">Spanner 提交前故意等一个区间宽度，让后来者的区间一定排在后面；区间越窄，等得越短。</text>
+</svg>
+<figcaption>本站画的示意图，数字是编的。书里说多数系统读时钟时根本不告诉你这个区间有多宽，Spanner 的 TrueTime 和 Amazon 的 ClockBound 是例外（§3.3）。</figcaption>
+</figure>
+<div class="pair">
+<figure class="fig"><img src="../assets/img/09-quartz-oscillator.jpg" alt="一个拆开金属外壳的晶体振荡器，白色陶瓷底板上有一片圆形的石英晶片，旁边是几个贴片元件" loading="lazy">
+<figcaption>拆开的晶体振荡器（Kyocera KXO-01，16.257 MHz）。中间那片圆形的就是石英晶体。计算机的时钟靠这样的振荡器计数，书里说它的漂移随温度变化（§3.2）。<span class="src">Marcin Andrzejewski，CC BY-SA 3.0，维基共享资源</span></figcaption></figure>
+<figure class="fig"><img src="../assets/img/09-ntp-gps-server.jpg" alt="一块树莓派 Zero 上叠着一块 GPS 扩展板，一根黄色跳线连着两块板子，旁边插着几根线缆" loading="lazy">
+<figcaption>有人用树莓派 Zero W 加一块 GPS 扩展板搭的 NTP 时间服务器，从 GPS 信号取时间，再发给网络里的其他机器。书里说 NTP 服务器的时间来自更准的源，比如 GPS 接收器（§3）。<span class="src">Steven Baltakatei Sandoval，CC BY-SA 4.0，维基共享资源</span></figcaption></figure>
+</div>
+
+<h3>停顿的持锁者和防护令牌</h3>
+<p>很多系统要求某件事同一时刻只有一个人做：一个分片只能有一个主，一个文件只能有一个写者。常用的办法是租约（lease）：一把带过期时间的锁，持有者要定期续；它崩溃了、不再续，租约就自然过期，别人可以接手。</p>
+<p>问题出在持有者自己的判断上。它看一眼「租约还剩 18 秒」，下一行代码去写，可就在这两行之间，进程停了 25 秒：一次让所有线程暂停的垃圾回收、虚拟机被挂起或迁移、一次卡住的磁盘读写、一次换页，都可能。它醒来时不知道自己停过，接着写；而租约早已过期，另一个客户端拿到租约正在写。这种「以为自己还持有租约」的前持有者叫僵尸（zombie）。指望它自觉不可靠，把它关掉也来不及，所以要让它写不进去：锁服务每授予一次租约，就附带一个递增的数字，叫防护令牌（fencing token）；客户端每次写都带上它，存储服务记住见过的最大令牌，比它小的一律拒绝。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 322" role="img" aria-label="上半是时间线：A 持有令牌 7 的租约到第 20 秒，A 的进程从第 4 秒停到第 29 秒；B 从第 20 秒起持有令牌 8。下半是存储按到达顺序收到的四次写：第 29 秒 A 带着令牌 7 来写，因为 7 小于见过的最大令牌 8 被拒绝">
+  <text class="t-b" x="10" y="18">谁持有租约，谁在干活</text>
+  <text class="t-m" x="10" y="47">A 的租约</text>
+  <rect class="b-a" x="80" y="30" width="320" height="24" rx="4"/>
+  <text x="240" y="47" text-anchor="middle">令牌 7，到第 20 秒过期</text>
+  <text class="t-m" x="10" y="75">A 的进程</text>
+  <rect class="box" x="80" y="58" width="64" height="24" rx="4"/>
+  <text x="112" y="75" text-anchor="middle">运行</text>
+  <rect class="b-warn" x="144" y="58" width="400" height="24" rx="4"/>
+  <text x="344" y="75" text-anchor="middle">停顿 25 秒（A 自己不知道）</text>
+  <rect class="box" x="544" y="58" width="48" height="24" rx="4"/>
+  <text x="568" y="75" text-anchor="middle">醒</text>
+  <text class="t-m" x="10" y="103">B 的租约</text>
+  <rect class="b-ok" x="400" y="86" width="192" height="24" rx="4"/>
+  <text x="496" y="103" text-anchor="middle">令牌 8</text>
+  <path class="ln" d="M80 118 H600"/>
+  <text class="t-m" x="80" y="134" text-anchor="middle">0</text>
+  <text class="t-m" x="144" y="134" text-anchor="middle">4</text>
+  <text class="t-m" x="400" y="134" text-anchor="middle">20</text>
+  <text class="t-m" x="544" y="134" text-anchor="middle">29 秒</text>
+  <text class="t-b" x="10" y="164">存储收到的写（按到达顺序）</text>
+  <text class="t-m" x="20" y="186">时刻</text>
+  <text class="t-m" x="110" y="186">来自</text>
+  <text class="t-m" x="180" y="186">令牌</text>
+  <text class="t-m" x="250" y="186">存储记住的最大令牌</text>
+  <text class="t-m" x="440" y="186">结果</text>
+  <rect class="box" x="10" y="194" width="620" height="22" rx="3"/>
+  <text x="20" y="210">第 2 秒</text><text x="110" y="210">A</text><text class="t-mono" x="180" y="210">7</text><text class="t-mono" x="250" y="210">7</text><text class="t-ok" x="440" y="210">接受</text>
+  <rect class="box" x="10" y="220" width="620" height="22" rx="3"/>
+  <text x="20" y="236">第 20 秒</text><text x="110" y="236">B</text><text class="t-mono" x="180" y="236">8</text><text class="t-mono" x="250" y="236">8</text><text class="t-ok" x="440" y="236">接受</text>
+  <rect class="b-bad" x="10" y="246" width="620" height="22" rx="3"/>
+  <text x="20" y="262">第 29 秒</text><text x="110" y="262">A</text><text class="t-mono" x="180" y="262">7</text><text class="t-mono" x="250" y="262">8</text><text class="t-bad" x="440" y="262">拒绝：7 比 8 小</text>
+  <rect class="box" x="10" y="272" width="620" height="22" rx="3"/>
+  <text x="20" y="288">第 31 秒</text><text x="110" y="288">B</text><text class="t-mono" x="180" y="288">8</text><text class="t-mono" x="250" y="288">8</text><text class="t-ok" x="440" y="288">接受</text>
+  <text class="t-m" x="10" y="314">没有令牌检查时，第 29 秒那次写会被接受，盖掉 B 刚写的数据。</text>
+</svg>
+<figcaption>本站画的示意图，令牌号和时刻是编的。关键在下半：判断「这次写还算不算数」的，是存储，而不是写的那一方。</figcaption>
+</figure>
+
+<h3>先说清楚假设：系统模型</h3>
+<p>一个分布式算法在什么样的世界里正确？把假设写下来，就是系统模型（system model）。时间方面常用三种：同步（延迟、停顿、时钟误差都有固定上界）、部分同步（大多数时候有上界，偶尔被打破）、异步（不许做任何时间假设，连时钟都没有）。节点故障方面：崩溃-停止（坏了就再也不回来）、崩溃-恢复（会回来，盘上的东西还在，内存丢了）、拜占庭（什么都可能做，包括撒谎）。书里还专门提了一种难缠的：节点没死，只是慢得没法干活。</p>
+<p>有了模型，「正确」用性质（property）来定义，分两类。安全性（safety）大致是「坏事不发生」：一旦违反，能指出是哪一刻，而且没法挽回，比如发出了两个相同的令牌。活性（liveness）大致是「好事终会发生」：定义里常带着「最终」二字，此刻没做到，将来还有希望。这一对概念的用处，是让你在故障面前分清哪些承诺必须守住、哪些可以附带条件。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 300" role="img" aria-label="系统模型的两条轴：时间假设从同步到部分同步到异步，假设越来越弱；节点故障从崩溃-停止、崩溃-恢复、变慢半坏到拜占庭，越来越难对付；最下面是两类性质：安全性和活性">
+  <defs><marker id="a9m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="20">时间方面的假设</text>
+  <rect class="b-a" x="10" y="30" width="196" height="46" rx="6"/>
+  <text class="t-b" x="108" y="49" text-anchor="middle">同步</text>
+  <text class="t-m" x="108" y="68" text-anchor="middle">延迟、停顿、误差都有上界</text>
+  <rect class="b-a" x="222" y="30" width="196" height="46" rx="6"/>
+  <text class="t-b" x="320" y="49" text-anchor="middle">部分同步</text>
+  <text class="t-m" x="320" y="68" text-anchor="middle">平时有上界，偶尔被打破</text>
+  <rect class="b-a" x="434" y="30" width="196" height="46" rx="6"/>
+  <text class="t-b" x="532" y="49" text-anchor="middle">异步</text>
+  <text class="t-m" x="532" y="68" text-anchor="middle">不许做任何时间假设</text>
+  <path class="ln" d="M20 90 H620" marker-end="url(#a9m)"/>
+  <text class="t-m" x="10" y="108">假设强：算法好写，但不一定成立</text>
+  <text class="t-m" x="630" y="108" text-anchor="end">假设弱：处处成立，但很难做成事</text>
+  <text class="t-b" x="10" y="140">节点故障方面的假设</text>
+  <rect class="box" x="10" y="150" width="146" height="46" rx="6"/>
+  <text class="t-b" x="83" y="169" text-anchor="middle">崩溃-停止</text>
+  <text class="t-m" x="83" y="188" text-anchor="middle">坏了就再不回来</text>
+  <rect class="box" x="168" y="150" width="146" height="46" rx="6"/>
+  <text class="t-b" x="241" y="169" text-anchor="middle">崩溃-恢复</text>
+  <text class="t-m" x="241" y="188" text-anchor="middle">会回来，内存丢了</text>
+  <rect class="box" x="326" y="150" width="146" height="46" rx="6"/>
+  <text class="t-b" x="399" y="169" text-anchor="middle">变慢、半坏</text>
+  <text class="t-m" x="399" y="188" text-anchor="middle">活着，但干不了活</text>
+  <rect class="box" x="484" y="150" width="146" height="46" rx="6"/>
+  <text class="t-b" x="557" y="169" text-anchor="middle">拜占庭</text>
+  <text class="t-m" x="557" y="188" text-anchor="middle">什么都可能，含撒谎</text>
+  <path class="ln" d="M20 210 H620" marker-end="url(#a9m)"/>
+  <text class="t-m" x="630" y="228" text-anchor="end">越往右越难对付</text>
+  <rect class="b-ok" x="10" y="240" width="305" height="50" rx="6"/>
+  <text class="t-b" x="162" y="260" text-anchor="middle">安全性：坏事不发生</text>
+  <text class="t-m" x="162" y="280" text-anchor="middle">违反了能指出是哪一刻，无法挽回</text>
+  <rect class="b-warn" x="325" y="240" width="305" height="50" rx="6"/>
+  <text class="t-b" x="477" y="260" text-anchor="middle">活性：好事终会发生</text>
+  <text class="t-m" x="477" y="280" text-anchor="middle">此刻没做到，将来还有希望</text>
+</svg>
+<figcaption>本站画的示意图。一个系统模型就是在上面两排里各选一格；算法的正确性，是说在这个模型允许的所有情况下，它要的性质都成立。</figcaption>
+</figure>
+
+<h3>这一章点名的系统</h3>
+<div class="sys">
+  <div><b>Spanner</b><span class="k">分布式数据库</span> 用 TrueTime 报告的时钟区间做跨数据中心的快照隔离，提交前故意等一个区间宽度。</div>
+  <div><b>ClockBound</b><span class="k">时钟服务</span> Amazon 的，读时钟时返回最早、最晚两个值；书里说 YugabyteDB 在 AWS 上可以用它。</div>
+  <div><b>Cassandra、ScyllaDB</b><span class="k">数据库</span> 书里的例子：直接用客户端时钟的时间戳加 LWW，省掉一次读。</div>
+  <div><b>ZooKeeper</b><span class="k">协调服务</span> 当锁服务用时，事务 ID（zxid）或节点版本（cversion）可以当防护令牌。</div>
+  <div><b>etcd</b><span class="k">协调服务</span> revision 号加上租约 ID，起防护令牌的作用。</div>
+  <div><b>Chubby</b><span class="k">锁服务</span> Google 的锁服务，防护令牌在这里叫 sequencer。</div>
+  <div><b>Jepsen</b><span class="k">故障注入框架</span> 书里说它在许多广泛使用的系统里找到过严重的 bug。</div>
+  <div><b>TLA+</b><span class="k">规格语言</span> 写算法规格、交给模型检查器验证的语言之一。</div>
+  <div><b>FoundationDB</b><span class="k">分布式数据库</span> 确定性模拟测试的先驱之一，建在一个叫 Flow 的异步通信库上。</div>
+  <div><b>Antithesis</b><span class="k">测试工具</span> 用自制的虚拟机监视器，把整台机器变成确定性的。</div>
+</div>
+
+<div class="table-wrap"><table class="terms">
+  <tr><th>英文</th><th>中文</th><th>一句话</th></tr>
+  <tr><td>partial failure</td><td><a class="term" href="../glossary.html#g-partial-failure">部分失效</a></td><td>系统的一部分坏了、其余照常，而且坏没坏都说不准（§1）。</td></tr>
+  <tr><td>network partition</td><td>网络分区</td><td>网络的一部分和其余部分断开。和数据分片不是一回事（§2.2）。</td></tr>
+  <tr><td>timeout</td><td>超时</td><td>等多久没回音就当对方挂了；几乎唯一可靠的故障检测手段（§2.4）。</td></tr>
+  <tr><td>unbounded delay</td><td>没有上限的延迟</td><td>异步网络不保证包多久送到，可以任意慢（§2.4）。</td></tr>
+  <tr><td>time-of-day clock</td><td>日历时钟</td><td>返回日期和时间，和 NTP 对齐，可能被拨回（§3.1）。</td></tr>
+  <tr><td>monotonic clock</td><td><a class="term" href="../glossary.html#g-monotonic-clock">单调时钟</a></td><td>只往前走，用来测时长；不同机器的读数不能比（§3.1）。</td></tr>
+  <tr><td>clock drift</td><td>时钟漂移</td><td>石英钟走快或走慢，随温度变化（§3.2）。</td></tr>
+  <tr><td>last write wins (LWW)</td><td>最后写入者胜</td><td>冲突时留时间戳最大的写，其余悄悄丢弃（§3.3）。</td></tr>
+  <tr><td>lease</td><td><a class="term" href="../glossary.html#g-lease">租约</a></td><td>带过期时间的锁，持有者要定期续（§3.4）。</td></tr>
+  <tr><td>quorum</td><td><a class="term" href="../glossary.html#g-quorum">法定人数</a></td><td>要几个节点投票才算数的决定，最常见的是过半（§4.1）。</td></tr>
+  <tr><td>split brain</td><td><a class="term" href="../glossary.html#g-split-brain">脑裂</a></td><td>两个节点同时以为自己是唯一的那个主（§4.2）。</td></tr>
+  <tr><td>fencing token</td><td><a class="term" href="../glossary.html#g-fencing-token">防护令牌</a></td><td>每次授予锁都递增的数字，存储据此拒绝过期持有者的写（§4.2）。</td></tr>
+  <tr><td>Byzantine fault</td><td><a class="term" href="../glossary.html#g-byzantine-fault">拜占庭故障</a></td><td>节点不按协议行事，甚至撒谎（§4.3）。</td></tr>
+  <tr><td>system model</td><td><a class="term" href="../glossary.html#g-system-model">系统模型</a></td><td>对网络、时钟、节点故障的假设；算法在它之内证明正确（§4.4）。</td></tr>
+  <tr><td>safety / liveness</td><td><a class="term" href="../glossary.html#g-safety-liveness">安全性 / 活性</a></td><td>「坏事不发生」和「好事终会发生」两类性质（§4.4）。</td></tr>
+</table></div>
+
+<h2>动手：模拟器</h2>
+<p>先猜：租约 10 秒，A 在第 3 秒续约，第 4 秒起停顿 15 秒。它醒来之后，还会写几次才发现自己已经不是持有者？存储会接受这几次写吗？打开防护令牌之后呢？再猜一个：停顿 7 秒和停顿 8 秒，结果会不会不一样？猜好了，一秒一秒地点着看。</p>
+<div class="sim" id="sim-09">
+  <div class="sim-head"><span class="tag">模拟器</span><h3>租约、进程停顿与防护令牌</h3><p class="desc">两个客户端 A、B 争一把租约，拿到的才能写存储。A 先拿到（令牌 7），每 3 秒为一轮：查一次租约（够就续），再写两次。B 一直等着，租约一过期就接手（令牌 8），接手的那一秒马上写一次。先点「前进 1 秒」。</p></div>
+  <div class="sim-body">
+    <div class="controls">
+      <button data-a="step">前进 1 秒</button>
+      <button data-a="run">走到结束</button>
+      <button data-a="reset">重置</button>
+      <span class="sep"></span>
+      <label>故障 <select data-r="mode"><option value="pause">A 的进程停顿</option><option value="net">A 的写在网络里滞留，A 随后崩溃</option></select></label>
+      <label>租约 <input data-r="ttl" type="range" min="5" max="15" value="10"><span data-r="ttlv">10</span> 秒</label>
+      <label>故障时长 <input data-r="dur" type="range" min="0" max="20" value="15"><span data-r="durv">15</span> 秒</label>
+      <label><input data-r="fence" type="checkbox"> 防护令牌</label>
+    </div>
+    <div class="stage" data-r="stage"></div>
+    <div class="narrate" data-r="say">点「前进 1 秒」开始。故障从第 4 秒开始。</div>
+    <div class="stats" data-r="stats"></div>
+  </div>
+</div>
+<ol class="qs">
+  <li>默认参数（租约 10 秒、停顿 15 秒、不开防护令牌）一秒一秒走到底。A 醒来时，它自己以为的和锁服务那边的实际情况各是什么？存储里哪几格变红了？</li>
+  <li>打开防护令牌再走一遍。A 的过期写入被谁拒绝、凭什么？为什么 A 马上就退下了，不用等到下一次查租约？</li>
+  <li>停顿改成 7 秒、8 秒各走一遍，差一秒，结果为什么不同？把租约加长到 15 秒，能「解决」停顿吗？再换成「写在网络里滞留」试试：A 根本没停顿，防护令牌为什么照样有用？</li>
+</ol>
+
+<h2>词与短语</h2>
+<p class="lede">词条按在书里出现的顺序排，按节分组；读一节之前先把这一节的过一遍，读的时候就不用停。斜体小字是原句里连续的几个词，在电子书里搜它就能找到那一句。标着「每个字都认识」的，是字面意思会把你带偏的。行话（quorum、lease 这类）不在这里，在上面的术语表里。</p>
+
+<h3 class="sec-head" id="s0">§0 <span class="first">As discussed in “Reliability and Fault Tolerance”…</span></h3>
+<div class="entry trap"><div class="en">happy path</div><div class="loc" data-p="3">… to focus mostly on the happy path …</div><div class="zh">一切顺利、不出错的那条执行路径</div><div class="note">设计和测试里的常用说法；和它相对的是各种出错的分支（edge cases）。</div></div>
+<div class="entry trap"><div class="en">new and exciting ways</div><div class="loc" data-p="5">… in lots of new and exciting ways …</div><div class="zh">各种新花样（反话）</div><div class="note">exciting 是反讽：出错的方式「新颖刺激」，对写代码的人一点也不好玩。</div></div>
+<div class="entry trap"><div class="en">up against</div><div class="loc" data-p="6">… the challenges we are up against …</div><div class="zh">面对的、要对付的</div><div class="note">be up against 是「面临（困难、对手）」，不是「靠着」。</div></div>
+<div class="entry"><div class="en">turn our pessimism up</div><div class="loc" data-p="6">… turn our pessimism up to the maximum …</div><div class="zh">把悲观调到最大</div><div class="note">像拧音量旋钮，turn up 是调高。</div></div>
+
+<h3 class="sec-head" id="s1">§1 <span class="first">Faults and Partial Failures</span></h3>
+<div class="entry trap"><div class="en">having a bad day</div><div class="loc" data-p="7">… the computer is sometimes “having a bad day” …</div><div class="zh">今天状态不好</div><div class="note">把电脑拟人化。作者紧接着说，这多半只是软件写得差，不是机器真有情绪。</div></div>
+<div class="entry trap"><div class="en">flaky</div><div class="loc" data-p="8">… on a single computer should be flaky …</div><div class="zh">时好时坏、不稳定</div><div class="note">本义是一碰就掉渣。flaky test 指时而通过、时而失败的测试。</div></div>
+<div class="entry trap"><div class="en">get away with</div><div class="loc" data-p="9">… we can get away with ignoring it …</div><div class="zh">（做了本不该做的事却）侥幸没事</div><div class="note">这里：数据静默损坏很少见，所以不管它也能过得去。</div></div>
+<div class="entry trap"><div class="en">may well be</div><div class="loc" data-p="13">… there may well be some parts …</div><div class="zh">很可能有</div><div class="note">may well 是「很有可能」，比 may 更肯定，不是「也可以」。</div></div>
+
+<h3 class="sec-head" id="s2.1">§2.1 <span class="first">The Limitations of TCP</span></h3>
+<div class="entry"><div class="en">plug it back in</div><div class="loc" data-p="31">… TCP can’t plug it back in for you …</div><div class="zh">（替你）把网线插回去</div><div class="note">玩笑话：线被拔了，TCP 再怎么重传也没用。</div></div>
+
+<h3 class="sec-head" id="s2.2">§2.2 <span class="first">Network Faults in Practice</span></h3>
+<div class="entry trap"><div class="en">anecdotal evidence</div><div class="loc" data-p="34">… plenty of anecdotal evidence show that …</div><div class="zh">零散的亲历见闻（不是系统研究）</div><div class="note">anecdote 是轶事。常和 systematic studies 对举，意思是「不严谨，但很多」。</div></div>
+<div class="entry"><div class="en">be blamed on</div><div class="loc" data-p="37">… have been blamed on cows, beavers …</div><div class="zh">被归咎于</div></div>
+<div class="entry trap"><div class="en">scavenging</div><div class="loc" data-p="37">… accidental misconfiguration, scavenging, or sabotage …</div><div class="zh">（为卖废料）挖找废金属</div><div class="note">本义是在废弃物里翻捡能用的东西；和光缆中断放在一起，指有人挖地找废金属去卖，顺带把埋着的线缆挖断。和 sabotage（蓄意破坏）并列：一个是无心，一个是故意，都是人为造成的中断。</div></div>
+<div class="entry trap"><div class="en">there is no way around it</div><div class="loc" data-p="41">… there is no way around it …</div><div class="zh">躲不开、绕不过去</div></div>
+
+<h3 class="sec-head" id="s2.3">§2.3 <span class="first">Fault Detection</span></h3>
+<div class="entry trap"><div class="en">out of rotation</div><div class="loc" data-p="46">… take it out of rotation …</div><div class="zh">从轮流分发的名单里摘掉</div><div class="note">rotation 指负载均衡器轮流派请求的那份名单，不是「旋转」。</div></div>
+<div class="entry trap"><div class="en">be ruled out</div><div class="loc" data-p="51">… This option is ruled out if …</div><div class="zh">（这个办法）用不上、被排除</div></div>
+<div class="entry trap"><div class="en">count on</div><div class="loc" data-p="53">… but you can’t count on it …</div><div class="zh">指望、依赖</div><div class="note">不是「数」：count on someone 是靠得住某人。</div></div>
+<div class="entry"><div class="en">strike a balance</div><div class="loc" data-p="53">… you need to strike a balance between …</div><div class="zh">在两者之间取得平衡</div></div>
+
+<h3 class="sec-head" id="s2.4">§2.4 <span class="first">Timeouts and Unbounded Delays</span></h3>
+<div class="entry trap"><div class="en">throw off balance</div><div class="loc" data-p="59">… to throw the system off balance …</div><div class="zh">打乱、让（系统）失去平衡</div><div class="note">throw 在这里是「使陷入某种状态」，不是扔。</div></div>
+<div class="entry trap"><div class="en">drain a queue</div><div class="loc" data-p="69">… spare capacity can easily drain queues …</div><div class="zh">把队列消化完、排空</div><div class="note">drain 本义排水，也用于 drain a node（把节点上的请求处理完、不再派新的）。</div></div>
+<div class="entry"><div class="en">noisy neighbor</div><div class="loc" data-p="70">… someone near you (a noisy neighbor) …</div><div class="zh">吵闹的邻居</div><div class="note">云上和你共用同一批硬件、正在大量占用资源的其他租户。</div></div>
+
+<h3 class="sec-head" id="s2.5">§2.5 <span class="first">Synchronous Versus Asynchronous Networks</span></h3>
+<div class="entry trap"><div class="en">opportunistically</div><div class="loc" data-p="77">… connection opportunistically use whatever network bandwidth …</div><div class="zh">有空就用、见缝插针地</div><div class="note">没有中文「机会主义」的贬义，就是「有什么用什么」。</div></div>
+<div class="entry"><div class="en">push and jostle</div><div class="loc" data-p="83">… Senders push and jostle with one another …</div><div class="zh">你推我挤</div></div>
+<div class="entry"><div class="en">a law of nature</div><div class="loc" data-p="86">… are not a law of nature but …</div><div class="zh">自然规律、天经地义的事</div><div class="note">作者在说：延迟不定是人选出来的，不是非这样不可。</div></div>
+<div class="entry trap"><div class="en">bear a resemblance to</div><div class="loc" data-p="90">… bear a closer resemblance to circuit switching …</div><div class="zh">和……相像</div><div class="note">bear 在这里是「带有、具有」，不是熊，也不是忍受。</div></div>
+<div class="entry trap"><div class="en">that said</div><div class="loc" data-p="90">… That said, internet routing operates …</div><div class="zh">话虽如此</div><div class="note">句首的让步，后面要给前一句打折扣。</div></div>
+
+<h3 class="sec-head" id="s3">§3 <span class="first">Unreliable Clocks</span></h3>
+<div class="entry trap"><div class="en">a tricky business</div><div class="loc" data-p="101">… time is a tricky business, because …</div><div class="zh">一件棘手的事</div><div class="note">business 在这里是「事情」，不是生意。</div></div>
+
+<h3 class="sec-head" id="s3.1">§3.1 <span class="first">Monotonic Versus Time-of-Day Clocks</span></h3>
+<div class="entry trap"><div class="en">with a pinch of salt</div><div class="loc" data-p="109">… with a pinch of salt …</div><div class="zh">打个折扣听，别全信</div><div class="note">也说 with a grain of salt。作者对「单调」这个保证都留了一手。</div></div>
+
+<h3 class="sec-head" id="s3.2">§3.2 <span class="first">Clock Synchronization and Accuracy</span></h3>
+<div class="entry trap"><div class="en">fickle beasts</div><div class="loc" data-p="112">… NTP can be fickle beasts …</div><div class="zh">喜怒无常、靠不住的家伙</div><div class="note">beast 在口语里指难对付的东西，不是野兽。</div></div>
+<div class="entry"><div class="en">go unnoticed</div><div class="loc" data-p="115">… may go unnoticed for some time …</div><div class="zh">没人察觉</div></div>
+<div class="entry"><div class="en">bet something on</div><div class="loc" data-p="117">… to bet the correctness of your systems …</div><div class="zh">把……押在……上</div></div>
+<div class="entry"><div class="en">a stranger on the internet</div><div class="loc" data-p="117">… told by a stranger on the internet …</div><div class="zh">网上的陌生人</div><div class="note">指公网上的 NTP 服务器。口吻是调侃：你的系统对不对，取决于一个素不相识的人告诉你几点了。</div></div>
+<div class="entry trap"><div class="en">sneak into</div><div class="loc" data-p="118">… to sneak into a system …</div><div class="zh">不知不觉地混进来</div><div class="note">sneak 是偷偷溜进；这里的主语是错误的假设，不是人。</div></div>
+
+<h3 class="sec-head" id="s3.3">§3.3 <span class="first">Relying on Synchronized Clocks</span></h3>
+<div class="entry"><div class="en">mysteriously disappear</div><div class="loc" data-p="133">… Database writes can mysteriously disappear …</div><div class="zh">莫名其妙地消失</div></div>
+<div class="entry trap"><div class="en">tiebreaker</div><div class="loc" data-p="135">… An additional tiebreaker value (which can …</div><div class="zh">打平时用来分胜负的附加值</div><div class="note">tie 是平局。比赛里的加赛、抽签都是 tiebreaker。</div></div>
+<div class="entry trap"><div class="en">untenable</div><div class="loc" data-p="146">… distributed system becomes an untenable bottleneck …</div><div class="zh">撑不下去的、站不住的</div><div class="note">本义是（阵地）守不住。</div></div>
+
+<h3 class="sec-head" id="s3.4">§3.4 <span class="first">Process Pauses</span></h3>
+<div class="entry trap"><div class="en">conspire to</div><div class="loc" data-p="164">… may even conspire to combine their delays …</div><div class="zh">（像串通好了一样）凑到一起</div><div class="note">conspire 本义密谋。这里拟人：两种停顿碰巧叠在一起，延迟更长。</div></div>
+<div class="entry"><div class="en">inopportune</div><div class="loc" data-p="173">… because of an inopportune GC pause …</div><div class="zh">不合时宜的、偏偏在这时候的</div></div>
+
+<h3 class="sec-head" id="s4">§4 <span class="first">Knowledge, Truth, and Lies</span></h3>
+<div class="entry trap"><div class="en">border on</div><div class="loc" data-p="184">… Discussions of these systems border on the philosophical …</div><div class="zh">近乎、接近于</div><div class="note">border 当动词：挨着边。</div></div>
+<div class="entry"><div class="en">the meaning of life</div><div class="loc" data-p="185">… figuring out the meaning of life …</div><div class="zh">人生的意义</div><div class="note">玩笑：讨论虽然近乎哲学，好在不用弄清人生的意义。</div></div>
+
+<h3 class="sec-head" id="s4.1">§4.1 <span class="first">The Majority Rules</span></h3>
+<div class="entry trap"><div class="en">kicking and screaming</div><div class="loc" data-p="187">… dragged to the graveyard, kicking and screaming …</div><div class="zh">拼命挣扎、连踢带喊</div><div class="note">常形容被迫做极不情愿的事。这一段整段是葬礼的比喻，读的时候别当真。</div></div>
+<div class="entry"><div class="en">stoic determination</div><div class="loc" data-p="187">… procession continues with stoic determination …</div><div class="zh">面不改色、不为所动</div></div>
+<div class="entry"><div class="en">abide by</div><div class="loc" data-p="191">… must abide by the quorum decision …</div><div class="zh">服从、遵守</div></div>
+<div class="entry trap"><div class="en">step down</div><div class="loc" data-p="191">… the quorum decision and step down …</div><div class="zh">退位、让出（主节点的）位置</div><div class="note">不是「走下来」：领导辞职也说 step down。</div></div>
+
+<h3 class="sec-head" id="s4.2">§4.2 <span class="first">Distributed Locks and Leases</span></h3>
+<div class="entry"><div class="en">prone to misuse</div><div class="loc" data-p="193">… are prone to misuse and are …</div><div class="zh">容易被用错</div></div>
+<div class="entry trap"><div class="en">come back to life</div><div class="loc" data-p="210">… client 1 comes back to life …</div><div class="zh">「活」过来</div><div class="note">这里只是停顿结束、接着运行，不是真的重启。</div></div>
+
+<h3 class="sec-head" id="s4.3">§4.3 <span class="first">Byzantine Faults</span></h3>
+<div class="entry"><div class="en">subvert</div><div class="loc" data-p="219">… deliberately wanted to subvert the system’s guarantees …</div><div class="zh">（暗中）破坏、颠覆</div></div>
+<div class="entry"><div class="en">play by the rules</div><div class="loc" data-p="220">… playing by the rules of the protocol …</div><div class="zh">守规矩</div></div>
+<div class="entry trap"><div class="en">to the best of its knowledge</div><div class="loc" data-p="220">… To the best of its knowledge, it …</div><div class="zh">就它所知</div><div class="note">意思是：它说的可能是错的（信息过时了），但它不是故意骗人。</div></div>
+<div class="entry"><div class="en">in their midst</div><div class="loc" data-p="223">… hampered by traitors in their midst …</div><div class="zh">（叛徒）就在他们中间</div><div class="note">hampered 是受阻、被拖累。</div></div>
+<div class="entry trap"><div class="en">not such a good idea</div><div class="loc" data-p="224">… was not such a good idea …</div><div class="zh">不怎么好的主意（其实是很糟）</div><div class="note">往轻里说，要反着读：用某个真实民族命名，是会得罪人的。</div></div>
+<div class="entry trap"><div class="en">hopefully</div><div class="loc" data-p="228">… so they can hopefully be trusted …</div><div class="zh">但愿（能信得过）</div><div class="note">作者留了余地：自己机房的节点「应该」可信，不打包票。</div></div>
+<div class="entry trap"><div class="en">full-blown</div><div class="loc" data-p="232">… are not full-blown Byzantine fault tolerance …</div><div class="zh">完整的、十足的</div><div class="note">本义是花完全开放。</div></div>
+<div class="entry trap"><div class="en">determined adversary</div><div class="loc" data-p="232">… withstand a determined adversary …</div><div class="zh">铁了心要搞破坏的对手</div><div class="note">determined 是「下定决心的」，不是「确定的」。</div></div>
+
+<h3 class="sec-head" id="s4.4">§4.4 <span class="first">System Model and Reality</span></h3>
+<div class="entry trap"><div class="en">reckon with</div><div class="loc" data-p="242">… we have to reckon with the fact …</div><div class="zh">正视、把……考虑进去</div></div>
+<div class="entry"><div class="en">limping node</div><div class="loc" data-p="251">… called a limping node, gray failure …</div><div class="zh">「瘸腿」的节点</div><div class="note">limp 是一瘸一拐地走：还活着、还能回话，就是慢得干不了活。</div></div>
+<div class="entry"><div class="en">erratic</div><div class="loc" data-p="251">… worn-out SSDs can have erratic performance …</div><div class="zh">忽快忽慢、没有规律的</div></div>
+<div class="entry trap"><div class="en">a giveaway</div><div class="loc" data-p="265">… A giveaway is that liveness properties …</div><div class="zh">一眼就能认出来的标志</div><div class="note">giveaway 也是赠品，这里是「露馅的地方」。</div></div>
+<div class="entry"><div class="en">you guessed it</div><div class="loc" data-p="265">… And yes, you guessed it …</div><div class="zh">没错，你猜对了</div><div class="note">口语。作者在逗读者：最终一致性正是一种活性。</div></div>
+<div class="entry trap"><div class="en">read too much into</div><div class="loc" data-p="266">… to not read too much into those …</div><div class="zh">过度解读</div></div>
+<div class="entry trap"><div class="en">come back to bite you</div><div class="loc" data-p="271">… come back to bite you again …</div><div class="zh">回过头来坑你</div><div class="note">bite 是咬：当初忽略的东西后来让你吃苦头。</div></div>
+<div class="entry trap"><div class="en">boil down to</div><div class="loc" data-p="274">… that handling boils down to …</div><div class="zh">归根到底就是</div><div class="note">像熬汤熬到只剩一点。</div></div>
+<div class="entry trap"><div class="en">quite the opposite</div><div class="loc" data-p="275">… system models are worthless—quite the opposite …</div><div class="zh">恰恰相反</div><div class="note">前面先说「这不是说……没用」，再用它把话扳回来。</div></div>
+
+<h3 class="sec-head" id="s4.5">§4.5 <span class="first">Formal Methods and Randomized Testing</span></h3>
+<div class="entry"><div class="en">prudent</div><div class="loc" data-p="278">… It is prudent to combine theoretical …</div><div class="zh">审慎的、明智的</div></div>
+<div class="entry trap"><div class="en">go out of sync</div><div class="loc" data-p="282">… go out of sync with each other …</div><div class="zh">对不上、各走各的</div><div class="note">这里说的是规格和代码，改了一边忘了另一边。</div></div>
+<div class="entry trap"><div class="en">from the ground up</div><div class="loc" data-p="291">… are built from the ground up …</div><div class="zh">从一开始就（按这个目标）设计</div><div class="note">不是「从地面往上」：意思是不靠后来打补丁。</div></div>
+<div class="entry trap"><div class="en">first-class</div><div class="loc" data-p="291">… OLTP database with first-class DST support …</div><div class="zh">原生的、一等的（支持）</div><div class="note">技术英文里 first-class 指被当成核心功能对待，不是「头等舱」。</div></div>
+
+<h3 class="sec-head" id="s5">§5 <span class="first">Summary</span></h3>
+<div class="entry trap"><div class="en">let alone</div><div class="loc" data-p="309">… let alone on anything more profound …</div><div class="zh">更不用说</div><div class="note">连现在几点都谈不拢，更别提更深的事。</div></div>
+<div class="entry"><div class="en">Pandora’s box</div><div class="loc" data-p="310">… avoid opening Pandora’s box and …</div><div class="zh">潘多拉的盒子</div><div class="note">一打开，麻烦就收不回去了。这里指走上分布式这条路。</div></div>
+<div class="entry trap"><div class="en">bring to its knees</div><div class="loc" data-p="311">… bring a distributed system to its knees …</div><div class="zh">把……搞垮</div><div class="note">字面是逼得跪下。</div></div>
+
+<div class="gate"><b>到这里先停下，去读原书</b><p>下面是读完再看的：你的预测对不对、几道换成你来选的判断题、值得细读的句子和理解检查。先看了，读书时就只是在找答案。</p></div>
+
+<h2>读完：回到你的预测</h2>
+<div class="payoff" data-bet="09-a"><div class="mine"></div>
+<p>书里的答案是第三项（§3.4、§4.2）。没有任何东西会告诉一个线程它刚停过：它的下一行代码就是写，要等下一次看时钟才可能发现租约早过期了。§3.4 用租约的例子讲这一点，停顿恰好发生在检查租约和处理请求之间；§4.2 讲后果：两个客户端都以为自己持有租约，写在一起把文件写坏。第一项错在线程醒来不会被通知；第二项错在 A 停着的时候什么都做不了，就算有通知也没人处理；第四项错在存储服务本来不知道租约这回事，除非它检查防护令牌。想一想：如果锁服务每次授予租约都附带一个递增的令牌，A 带着旧令牌的写到达存储时，结果会变吗？</p></div>
+<div class="payoff" data-bet="09-b"><div class="mine"></div>
+<p>书里的答案是第二项（§3.3）。LWW 只比时间戳：P 的时钟快 80 毫秒，Q 那次写虽然真的晚了 30 毫秒，时间戳却小 50 毫秒，于是被当成旧值扔掉，应用收不到任何错误。书里把这叫写入莫名其妙地消失：时钟慢的节点，要等时钟差走完之后才能覆盖时钟快的节点写过的值。第三项是另一类做法（版本向量那一套，保留并发的值），要额外跟踪因果关系，LWW 不做；第五项听着合理，但 LWW 恰恰不看到达顺序。想一想：两次写的间隔从 30 毫秒拉长到 200 毫秒，答案会变吗？</p></div>
+
+<h2>判断题：换成你来选</h2>
+<p class="lede">场景都是本站编的。先选，再看解释；解释里写了对应的节号，拿不准就回原书看那一节。</p>
+<p class="quiz-score"></p>
+<div class="mcq" data-answer="1"><div class="q">超时该怎么调？<span class="sec">§2.4</span></div>
+  <p class="ctx">场景：一个跨两个机房的订单服务用心跳判断节点死活，超时 300 毫秒。平时往返 2 毫秒，但每天晚上跑对账批任务时，偶尔有几秒钟往返涨到 500 毫秒以上，接着就是一串「判死 → 主从切换 → 又切回来」，有一次还连锁拖垮了整个集群。</p>
+  <div class="opts"><button>把超时降到 50 毫秒，早发现、早切换</button><button>长期测量往返时间的分布（包括跑批的时段），按尾部重新定超时，或者改用按观测到的抖动自动调整的检测器</button><button>按 2d + r 算一个理论超时：d 取单程平均延迟，r 取平均处理时间</button><button>给交换机加一套冗余链路，网络就不会再慢</button></div>
+  <div class="explain"><p>延迟没有上界，超时只能靠测：在足够长的时间、足够多的机器上测往返时间的分布，再在检测速度和误判之间取舍；更好的是像 Phi Accrual 那样按观测到的抖动自动调。缩短超时只会误判得更多，把负载转给本来就忙的节点，正是连锁故障的来路。2d + r 只在延迟有保证的上界时才成立，拿平均值去算更没有意义。书里还提到，冗余的网络设备减少故障的效果没有想象中大，何况这里的问题是排队，不是设备坏了。</p></div></div>
+<div class="mcq" data-answer="2"><div class="q">这些「改了不生效」是哪一类问题？<span class="sec">§3.2</span><span class="sec">§3.3</span></div>
+  <p class="ctx">场景：一个无主复制的库存库用客户端时间戳加「最后写入者胜」。某台应用服务器被一条新加的防火墙规则挡住了 NTP。三周后客服反映：经这台服务器处理的库存调整「有时不生效」，没有任何报错，重试也一样；同一个商品从别的服务器改就正常。</p>
+  <div class="opts"><button>复制延迟：读到了还没追上的副本</button><button>网络分区：这台服务器的写没送到足够多的副本</button><button>这台服务器的时钟慢了，打的时间戳比别处之前写的值还小，被 LWW 当作旧值悄悄丢掉</button><button>拜占庭故障：这台服务器在故意发错误的数据</button></div>
+  <div class="explain"><p>书里列的正是这种情形：节点被防火墙隔开 NTP，漂移越积越大，一时没人发觉；时钟慢的节点写的值要等时钟差过去才能覆盖别人的值，而且不报错。复制延迟过一会儿自己就好了，重试不会一直不生效；写不到足够多的副本，客户端通常会收到超时或失败；拜占庭指节点不守协议，这台服务器是诚实的，只是时钟错了。书里的建议是监控各节点之间的时钟偏差，偏得太多的节点直接摘掉。</p></div></div>
+<div class="mcq" data-answer="0"><div class="q">这段限流代码该改哪里？<span class="sec">§3.1</span></div>
+  <p class="ctx">场景：一个接口限流器每来一个请求就读一次系统时间（Unix 毫秒数），和上次的读数相减，算出过去了多少毫秒，据此补充令牌。上线后某天凌晨，日志里出现「过去了 -1200 毫秒」，那一分钟里所有请求都被拒绝了。</p>
+  <div class="opts"><button>改用单调时钟算间隔：日历时钟可能被 NTP 往回拨</button><button>改用精度更高的系统时间，比如微秒</button><button>把这台机器的 NTP 关掉，系统时间就不会跳了</button><button>每次读完系统时间，再去 NTP 服务器核对一遍</button></div>
+  <div class="explain"><p>相减算时长，正是单调时钟的用途：它保证只往前走，差值就是经过的时间。日历时钟和 NTP 差得太多时会被强制重设，看上去就是时间倒流，闰秒也会造成跳变。精度再高也挡不住跳变；关掉 NTP，时钟会一直漂下去；每次都去核对既慢，读回来的时间又受网络延迟影响。</p></div></div>
+<div class="mcq" data-answer="3"><div class="q">怎样最可靠地防止汇总表被写坏？<span class="sec">§4.2</span></div>
+  <p class="ctx">场景：几台报表机器抢一把分布式锁（租约 30 秒），抢到的那台生成当天的汇总表，写进对象存储里的同一个对象。最近偶尔发现汇总表里混着两台机器写的数据。排查发现每次都伴随一次 40 秒左右的 GC 停顿。</p>
+  <div class="opts"><button>把租约延长到 5 分钟，停顿就不会超过租约</button><button>每次写之前再检查一遍租约有没有过期</button><button>一发现某台机器停顿太久，就通过云平台的管理接口把它关机</button><button>锁服务每次授予租约时发一个递增的令牌，写对象时带上它，让存储拒绝令牌更小的写（或者改用对象存储的条件写）</button></div>
+  <div class="explain"><p>前三项都在和时间赛跑：停顿可以比任何租约都长；「写之前再查一遍」挡不住查完和写之间的那次停顿，也挡不住在网络里滞留很久才到的旧请求；关机往往来不及，书里还说它挡不住延迟到达的请求，几台机器还可能互相关掉。防护令牌把判断放在存储那一侧：存储记住见过的最大令牌，旧令牌的写一律拒绝，不管它停了多久、在路上走了多久。对象存储的条件写能起同样的作用。</p></div></div>
+<div class="mcq" data-answer="2"><div class="q">要不要换成拜占庭容错的协议？<span class="sec">§4.3</span></div>
+  <p class="ctx">场景：公司内部一个 5 节点的配置中心，跑在自己的机房里。安全组提议换成一种拜占庭容错的共识协议，理由是「这样即使有一个节点被黑，或者软件出了 bug，也不会出错」。</p>
+  <div class="opts"><button>应该换：拜占庭容错能同时防住 bug 和攻击</button><button>应该换：只要节点够多，额外开销可以忽略</button><button>不划算：五个节点跑同一份软件，bug 和漏洞五台都有，攻破一台多半就能攻破全部；该做的是认证、访问控制、校验和输入检查</button><button>不需要：内部网络不会丢包，所以不会有拜占庭故障</button></div>
+  <div class="explain"><p>书里说，多数拜占庭容错算法要求超过三分之二的节点正常（4 个节点最多容忍 1 个坏的），想用它防 bug，就得有几套彼此独立的实现。攻击者能攻破一个节点，多半也能攻破其余跑同样软件的节点，所以认证、访问控制、加密、防火墙仍是主要防线。这类协议很贵，在数据中心里通常不划算，更适合多方互不信任、没有中央权威的场合。丢包和拜占庭故障是两回事：前者节点是诚实的，只是消息丢了。</p></div></div>
+
+<h2>和本站其他书对照</h2>
+<div class="who">
+  <div><b>超时、重传和端到端</b><span class="en">OSTEP 第 48 章</span>那一章从「怎么在不可靠的网络上做可靠通信」讲起：发送方分不清请求丢了还是确认丢了，只能超时重传。它的端到端论证，正对应 §2.1 那句「要确认请求成功，得要应用自己回话」。那里有一个可以单步的泳道图模拟器。<a class="go" href="/ostep/chapters/48-distributed.html">去那一页 →</a></div>
+  <div><b>单机上的锁</b><span class="en">OSTEP 第 28 章</span>单机上的锁靠硬件原子指令和共享内存，持锁的线程停多久，锁都还是它的。§3.4 说这些工具搬不到分布式系统里：没有共享内存，只有会丢会慢的消息，锁只好变成会过期的租约。<a class="go" href="/ostep/chapters/28-locks.html">去那一页 →</a></div>
+  <div><b>换页和抖动</b><span class="en">OSTEP 第 22 章</span>§3.4 把换页列为进程停顿的来源之一，内存压力大时系统可能大部分时间都在换进换出（抖动）。OSTEP 那一章讲抖动是怎么来的，以及操作系统怎么用准入控制应对。<a class="go" href="/ostep/chapters/22-swap-policies.html">去那一页 →</a></div>
+</div>
+
+<h2>值得停下来的句子</h2>
+<blockquote class="quote">In distributed systems, suspicion, pessimism, and paranoia pay off.<cite>— §1。本站译：在分布式系统里，多疑、悲观和偏执是有回报的。</cite></blockquote>
+<p>这句话定下了全章的姿态。写单机程序时，「这种情况几乎不会发生」是一个合理的理由；在足够大的分布式系统里，百万分之一的事每天都在发生，而且发生时往往不报错，只是悄悄写错数据。读后面的每一节，都可以拿这句话问一遍：如果我假设的那件事偏偏不成立，会坏在哪里？</p>
+<blockquote class="quote">The moral of these stories is that a node cannot necessarily trust its own judgment of a situation.<cite>— §4.1。本站译：这几个故事的教训是，一个节点未必能相信自己对局面的判断。</cite></blockquote>
+<p>这一句是全章从「问题」转向「怎么想」的枢纽。前面的网络、时钟、停顿，归结起来都是「一个节点看到的不一定是真的」。由此推出后面两件事：重大决定交给多数派，而不是某一个节点；被多数派判死的节点要服从，而它写进去的东西，要由存储用防护令牌来把关。第 10 章的共识，就是在这个前提上搭起来的。</p>
+
+<h2>检查一下理解</h2>
+<details class="check"><summary>1.（§1）单机为什么被设计成「要么正常、要么整个崩掉」？分布式系统为什么做不到？</summary><p>错误的结果比崩溃更难处理，所以单机遇到内部故障宁可整个停下，对外呈现一个确定、理想化的模型。多台机器通过网络相连时，一部分坏、一部分好是常态，坏没坏还常常说不准，只能在软件里去容忍它。</p></details>
+<details class="check"><summary>2.（§2.1）收到了 TCP 的确认，能不能说明对方已经处理了请求？</summary><p>不能。确认只说明对方的操作系统内核收到了数据，应用可能在处理之前就崩了。要确定请求成功，得要应用自己回一个明确的成功响应。</p></details>
+<details class="check"><summary>3.（§2.4）系统已经过载时，过早地判定一个节点死亡，为什么会让情况更糟？</summary><p>它的工作要转给别的节点，给它们和网络加了负担。如果它只是因为过载才慢，转出去的负载会让更多节点变慢、被判死，形成连锁故障，极端情况下所有节点互相宣布对方死亡。</p></details>
+<details class="check"><summary>4.（§2.5）书里说网络延迟不确定「不是自然规律」，那它是什么？</summary><p>是一笔成本和收益的账：静态预留资源（像电话网的电路）能保证延迟，但闲着的带宽也不能给别人用，贵；动态共享利用率高、便宜，代价是排队和延迟波动。多数系统选了便宜的那边。</p></details>
+<details class="check"><summary>5.（§3.3）为什么说时钟读数更像一个区间？区间的宽度由什么决定？</summary><p>读数可以精确到微秒，误差却可能是几毫秒到上百毫秒，小数点后那几位没有意义。宽度取决于时间来源：上次同步以来的石英漂移、NTP 服务器自己的误差、到服务器的往返时间。多数系统不告诉你这个误差，TrueTime 和 ClockBound 是例外。</p></details>
+<details class="check"><summary>6.（§4.1）一个节点被多数派宣布死亡，可它觉得自己好好的，该听谁的？多数派为什么安全？</summary><p>听多数派的，自己退下。任何时刻系统里只可能有一个多数派，不会同时出现两个做出互相冲突的决定。</p></details>
+<details class="check"><summary>7.（§4.2）新拿到租约的客户端，为什么要马上写一次存储？</summary><p>存储只有处理过一次带新令牌的写，才知道最大令牌已经涨了，才会拒绝旧令牌。这次写完成之前，僵尸带旧令牌的写还可能被接受。</p></details>
+<details class="check"><summary>8.（§4.4）「令牌不重复」和「请求令牌的节点最终会收到回应」分别是哪类性质？怎么区分？</summary><p>前者是安全性，后者是活性。安全性一旦被违反，能指出是哪一刻、无法挽回；活性在某一刻不满足，将来仍可能满足，定义里常带「最终」。分布式算法通常要求安全性在任何情况下都成立，活性可以附带条件。</p></details>
+<p>用一句话说这一章（写给一个没读过的朋友）：</p>
+<textarea class="note" data-key="09-oneline" placeholder="比如：……"></textarea>
+
+<h2>精彩回顾</h2>
+<p class="recall-line"><b>一句话：</b>网络、时钟、进程都靠不住，一个节点什么都不能确知；能做的是把假设写清楚，让多数派和令牌替单个节点做判断。</p>
+<div class="recall">
+  <div class="item"><b>只有「还没收到」</b><p>请求丢了、在排队、对方崩了、对方在停顿、回应丢了：发送方看到的都是同一件事。唯一的办法是超时。</p><span class="sec">§2</span></div>
+  <div class="item"><b>超时没有正确值</b><p>延迟没有上界。超时短了会把活节点判死，还可能引发连锁故障；长了发现得慢。只能长期测，或按抖动自动调。</p><span class="sec">§2.4</span></div>
+  <div class="item"><b>延迟不定是一笔账</b><p>电话网预留带宽，延迟有保证但浪费；包交换按需共享，便宜但要排队。不是物理定律，是成本取舍。</p><span class="sec">§2.5</span></div>
+  <div class="item"><b>慢时钟的写会消失</b><p>用 LWW 和各节点自己的时钟，时钟慢的节点写的值会被时钟快的节点写过的旧值压住，没有任何报错。</p><span class="sec">§3.3</span></div>
+  <div class="item"><b>Spanner 先等一等</b><p>时钟读数是一个区间。提交前等一个区间宽度，让前后两个事务的区间不重叠；GPS 和原子钟只是把区间压窄。</p><span class="sec">§3.3</span></div>
+  <div class="item"><b>醒来的僵尸</b><p>进程可能在任何一行停几十秒，醒来不知道自己停过。挡住它的不是它的自觉，而是存储检查递增的防护令牌。</p><span class="sec">§4.2</span></div>
+  <div class="item"><b>多数说了算</b><p>一个节点不能信自己的判断。被多数派宣布死亡，就得退下；任何时刻只可能有一个多数派。</p><span class="sec">§4.1</span></div>
+</div>
+
+</main>
+<script>
+(() => {
+  const root = document.getElementById("sim-09"), h = window.DD.h;
+  const $ = (r) => root.querySelector(`[data-r="${r}"]`);
+  const FIRST = 7;   // 锁服务之前已经发过 6 个令牌，A 拿到的是 7
+  const ONSET = 4;   // A 在第 3 秒查完租约，故障从第 4 秒开始
+  let S;
+  const params = () => ({ mode: $("mode").value, ttl: Number($("ttl").value), dur: Number($("dur").value), fence: $("fence").checked });
+  function reset() {
+    const p = params();
+    S = {
+      p, t: -1, lease: null, next: FIRST, maxTok: 0, flight: null,
+      A: { st: "run", pc: 0, tok: null, wake: 0 }, B: { st: "wait", pc: 0, tok: null },
+      log: [], stale: 0, rej: 0,
+      H: Math.max(3 + p.ttl, ONSET + p.dur) + 6,
+    };
+  }
+  const tag = (who, tok) => `${who}·${tok}`;
+  const valid = (who, tok, t) => S.lease && S.lease.who === who && S.lease.tok === tok && t < S.lease.exp;
+  // 存储收到一次写：开了防护令牌就比较令牌，否则来者不拒
+  // 同一秒里可能有两次写（A 的和 B 的），row.store 是一个列表
+  function store(who, tok, t, row, msgs, via) {
+    const ok = valid(who, tok, t);
+    if (S.p.fence && tok < S.maxTok) {
+      S.rej++; row.store.push({ txt: `✗${tok}`, cls: "dim" });
+      msgs.push(`存储收到 ${who} ${via}写（令牌 ${tok}）：已经见过令牌 ${S.maxTok}，${tok} 比它小，拒绝。`);
+      return false;
+    }
+    S.maxTok = Math.max(S.maxTok, tok);
+    if (ok) { row.store.push({ txt: String(tok), cls: "ok" }); msgs.push(`存储接受了 ${who} 的写（令牌 ${tok}）。`); return true; }
+    S.stale++; row.store.push({ txt: `${tok}!`, cls: "bad" });
+    msgs.push(`存储接受了 ${who} ${via}写（令牌 ${tok}），可 ${who} 早已不是持有者：它盖掉了 ${S.lease.who} 写的数据。` + (S.p.fence ? "" : "存储不检查令牌，分不出来。"));
+    return true;
+  }
+  function tick() {
+    const t = ++S.t, p = S.p, msgs = [], row = { lock: "", A: { txt: "" }, B: { txt: "" }, net: { txt: "" }, store: [] };
+    // 1. 锁服务：t = 0 时 A 拿到租约；租约到期后，一直在等的 B 立刻接手，并马上写一次
+    if (t === 0) {
+      S.lease = { who: "A", tok: S.next++, exp: p.ttl }; S.A.tok = S.lease.tok; S.A.pc = 1;
+      row.A = { txt: "取", cls: "on" }; msgs.push(`A 拿到租约，令牌 ${S.A.tok}，到第 ${p.ttl} 秒过期。B 在旁边等着。`);
+    } else if (S.lease && t >= S.lease.exp && S.B.st === "wait") {
+      msgs.push(`A 的租约在第 ${S.lease.exp} 秒到期了。`);
+      S.lease = { who: "B", tok: S.next++, exp: t + p.ttl }; S.B = { st: "hold", pc: 1, tok: S.lease.tok };
+      row.B = { txt: "取", cls: "on" };
+      msgs.push(`B 拿到租约，令牌 ${S.B.tok}，马上写一次：`);
+      store("B", S.B.tok, t, row, msgs, "的");
+    } else if (S.B.st === "wait") row.B = { txt: "等", cls: "idle" };
+    // 2. 在网络里滞留的写到了
+    if (S.flight && S.flight.at === t) {
+      row.net = { txt: "到", cls: "on" };
+      store("A", S.flight.tok, t, row, msgs, "迟到的");
+      S.flight = null;
+    } else if (S.flight) row.net = { txt: `${S.flight.tok}→`, cls: "on" };
+    // 3. A：一轮是「查租约、写、写」；停顿时程序计数器不动
+    const A = S.A;
+    if (A.st === "paused" && t >= A.wake) {
+      A.st = "run";
+      msgs.push(`A 醒了。在 A 看来只过了一瞬，它以为令牌 ${A.tok} 还有效，接着做停顿前要做的写。` +
+        (S.lease.who === "A" ? "" : `实际上锁服务那边，租约现在归 ${S.lease.who}（令牌 ${S.lease.tok}）。`));
+    }
+    if (t > 0 && A.st === "run") {
+      const step = A.pc % 3;
+      if (step === 0) {
+        if (S.lease.who === "A" && t < S.lease.exp) {
+          S.lease.exp = t + p.ttl; row.A = { txt: "续" };
+          msgs.push(`A 查了一下租约，还有效，续到第 ${S.lease.exp} 秒。`);
+        } else {
+          A.st = "down"; row.A = { txt: "退", cls: "on" };
+          msgs.push(`A 查租约，发现已经归 ${S.lease.who}，这才知道自己被取代了，退下。`);
+        }
+        A.pc++;
+      } else if (t === ONSET && p.dur > 0 && p.mode === "pause") {
+        A.st = "paused"; A.wake = ONSET + p.dur; row.A = { txt: "停", cls: "wait" };
+        msgs.push(`A 刚查完租约，正要写，进程停住了（比如一次长 GC），要停 ${p.dur} 秒。A 自己不会知道。`);
+      } else if (t === ONSET && p.dur > 0 && p.mode === "net") {
+        S.flight = { tok: A.tok, at: ONSET + p.dur }; A.st = "crashed"; row.A = { txt: "发", cls: "on" }; row.net = { txt: `${A.tok}→`, cls: "on" };
+        msgs.push(`A 发出一次写（令牌 ${A.tok}），这个包在网络里卡住了，要 ${p.dur} 秒后才到。A 随后崩溃，不再续约。`);
+      } else {
+        const ok = store("A", A.tok, t, row, msgs, "的");
+        row.A = { txt: "写", cls: row.store.some((w) => w.cls === "bad") ? "bad" : "" };
+        if (!ok) { A.st = "down"; row.A = { txt: "✗", cls: "bad" }; msgs.push("A 收到拒绝，知道自己的令牌过时了，马上退下。"); }
+        A.pc++;
+      }
+    } else if (A.st === "paused") row.A = { txt: "停", cls: "wait" };
+    else if (A.st === "crashed") row.A = { txt: "崩", cls: "idle" };
+    else if (A.st === "down" && !row.A.txt) row.A = { txt: "·", cls: "idle" };
+    // 4. B：接手之后也按「查租约、写、写」一轮轮走
+    if (S.B.st === "hold" && row.B.txt !== "取") {
+      const step = S.B.pc % 3;
+      if (step === 0) { S.lease.exp = t + p.ttl; row.B = { txt: "续" }; }
+      else { const before = msgs.length; store("B", S.B.tok, t, row, msgs, "的"); msgs.length = before; row.B = { txt: "写" }; }
+      S.B.pc++;
+    }
+    row.lock = S.lease ? tag(S.lease.who, S.lease.tok) : "";
+    S.log.push(row);
+    if (!msgs.length) msgs.push(S.B.st === "hold" ? `B 照常工作（令牌 ${S.B.tok}）。` : `A 照常工作（令牌 ${A.tok}）。`);
+    return `第 ${t} 秒：` + msgs.join("");
+  }
+  function summary() {
+    const p = S.p;
+    if (p.dur === 0) return "走完了。故障时长是 0，A 一直按时续约，B 始终拿不到租约，什么事都没有。把「故障时长」调大再试。";
+    if (S.stale) return `走完了。过期的写被存储接受了 ${S.stale} 次，数据被写坏。` + (p.fence ? "" : "打开「防护令牌」再走一遍。");
+    if (S.rej) return `走完了。过期的写被拒绝了 ${S.rej} 次，存储里的数据完好。`;
+    return "走完了。这次故障在租约到期之前就结束了，没有过期的写。把故障时长调大一点再试。";
+  }
+  function lane(label, cells) {
+    return h("div", { class: "lane" }, h("span", { class: "lbl" }, label), ...cells);
+  }
+  function render() {
+    $("ttlv").textContent = String(S.p.ttl); $("durv").textContent = String(S.p.dur);
+    const st = $("stage"); st.textContent = "";
+    const n = S.log.length;
+    if (!n) st.append(lane("时间线", [h("span", { class: "pill" }, "还没开始")]));
+    else {
+      const cell = (c) => h("span", { class: `cell ${c.cls || ""}` }, c.txt);
+      st.append(lane("秒", S.log.map((_, i) => h("span", { class: `cell hd ${i === n - 1 ? "on" : ""}` }, String(i)))));
+      st.append(lane("租约持有者", S.log.map((r) => h("span", { class: `cell ${r.lock.startsWith("A") ? "k1" : r.lock ? "k2" : ""}` }, r.lock))));
+      st.append(lane("客户端 A", S.log.map((r) => cell(r.A))));
+      if (S.p.mode === "net") st.append(lane("网络里", S.log.map((r) => cell(r.net))));
+      st.append(lane("客户端 B", S.log.map((r) => cell(r.B))));
+      st.append(lane("存储收到", S.log.map((r) => cell({ txt: r.store.map((w) => w.txt).join(" "), cls: (r.store.find((w) => w.cls === "bad") || r.store.find((w) => w.cls === "dim") || r.store[0] || {}).cls }))));
+      st.scrollLeft = st.scrollWidth;   // 时间线比画面宽时，滚到最新的一秒
+    }
+    const stats = $("stats"); stats.textContent = "";
+    const items = [
+      [S.t < 0 ? "—" : `${S.t} 秒`, "现在"],
+      [S.lease ? tag(S.lease.who, S.lease.tok) : "—", "锁服务：租约在谁手里"],
+      [S.p.fence ? (S.maxTok ? String(S.maxTok) : "—") : "不检查", "存储见过的最大令牌"],
+      [String(S.stale), "过期的写被接受"],
+      [String(S.rej), "过期的写被拒绝"],
+    ];
+    for (const [v, l] of items) stats.append(h("div", { class: "stat" }, h("div", { class: "v" }, v), h("div", { class: "l" }, l)));
+  }
+  const say = (t) => { $("say").textContent = t; };
+  const done = () => S.t >= S.H - 1;
+  const act = {
+    step: () => (done() ? "已经走到结束。点「重置」，或者改一个参数再来。" : (S.t + 1 >= S.H - 1 ? tick() + summary() : tick())),
+    run: () => { if (done()) return "已经走到结束。点「重置」，或者改一个参数再来。"; while (!done()) tick(); return summary(); },
+    reset: () => { reset(); return "清空了。点「前进 1 秒」开始，故障从第 4 秒开始。"; },
+  };
+  root.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-a]"); if (!b) return;
+    say(act[b.dataset.a]()); render();
+  });
+  for (const r of ["mode", "ttl", "dur", "fence"]) {
+    const el = $(r);
+    el.addEventListener(el.type === "range" ? "input" : "change", () => { reset(); say("参数改了，从头开始。点「前进 1 秒」。"); render(); });
+  }
+  reset(); render();
+})();
+</script>
+</body>
+</html>

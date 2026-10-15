@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 5 章 · 编码与演化 · DDIA 导读</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/chapters.js"></script>
+<script src="../assets/sections.js"></script>
+<script src="../assets/dd.js"></script>
+<style>
+#sim-05 button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--fg); }
+#sim-05 .lane > .lbl { min-width: 9.5em; }
+#sim-05 .grp { margin: 10px 0 2px; font-size: 12.5px; color: var(--muted); }
+@media (max-width: 520px) { #sim-05 .lane > .lbl { min-width: 100%; } }
+</style>
+</head>
+<body data-chapter="5">
+<main>
+
+<h2>这一章在做什么</h2>
+<div class="gist"><p>程序在内存里用对象和指针，写文件、发网络之前要先变成一串字节。这一章先比几类编码：语言自带的序列化、JSON 这类文本格式、带模式的二进制格式（Protocol Buffers 靠标签号，Avro 靠写者和读者两份模式）。真正的考题是演化：滚动升级和迟迟不更新的客户端，让新旧代码、新旧数据长期并存，编码要两个方向都读得通。后半看数据经过数据库、服务调用、工作流和消息时，谁写谁读，各要哪个方向的兼容。</p></div>
+<figure class="fig"><img src="../assets/img/05-rosetta-stone.jpg" alt="一块深灰色的石碑残块，正面刻满了三段文字：上面是象形文字，中间和下面是两种字母文字" loading="lazy">
+<figcaption>罗塞塔石碑，现藏大英博物馆。上面是公元前 196 年的一道诏令，用古埃及象形文字、世俗体和古希腊文各刻了一遍。1799 年被发现时，象形文字早已没人会读，学者拿认得的希腊文对照，Champollion 在 1822 年宣布破解。照片与本书无关，只是一个类比：数据往往比读它的程序活得久，要读懂它，得知道它当初是按什么规则写的。<span class="src">Hans Hillewaert，CC BY-SA 4.0，维基共享资源</span></figcaption></figure>
+
+<h2>读之前：先预测</h2>
+<p>第 2 章提出了「可演化性」：系统要容易改。第 3 章说文档数据库在读的时候才解释结构（schema-on-read），关系数据库在写的时候就强制模式。这一章把「改」落到字节上：数据一旦写下或发出，读它的程序可能比写它的新，也可能比它旧。第 4 章的 LSM 合并在这里也露了一面：它顺手把旧数据改写成新格式。往后看，第 9 章接着讲超时和确定性重放，第 11 章会再用到 Avro 这类大文件，第 12 章细讲消息代理和幂等。</p>
+
+<div class="bet" data-key="05-a">
+  <div class="q">一个订单服务用 Protocol Buffers 编码，新版本给订单加了字段 coupon（用一个新的标签号）。滚动升级进行到一半：一台新实例写了一条带 coupon 的订单；接着一台还没升级的旧实例把它读出来，改了状态，写回数据库。新代码再读这条订单，coupon 还在吗？</div>
+  <div class="opts">
+    <button>不在，也走不到这一步：旧代码读到不认识的标签就报错</button>
+    <button>一定丢了：旧代码的模式里根本没有 coupon</button>
+    <button>要看旧代码把记录解码成对象时，有没有把不认识的字段一起留着、写回时原样带上</button>
+    <button>一定还在：写回时只改了状态，别的字段数据库不会动</button>
+  </div>
+  <textarea class="note" data-key="05-a-bet" placeholder="你为什么这么猜？一两句就行"></textarea>
+</div>
+
+<div class="bet" data-key="05-b">
+  <div class="q">换成 Avro：新模式加了一个字段 vip，没有给默认值。新旧代码同时在跑，哪个方向会读不了？</div>
+  <div class="opts">
+    <button>旧代码读新数据：它不认识 vip</button>
+    <button>新代码读旧数据：旧数据里没有 vip，新模式又没给默认值</button>
+    <button>两个方向都会坏</button>
+    <button>两个方向都没事：Avro 按字段名对上，多出来的跳过，缺了的不管</button>
+  </div>
+  <textarea class="note" data-key="05-b-bet" placeholder="你为什么这么猜？"></textarea>
+</div>
+
+<div class="crux"><p>新旧代码、新旧数据会在系统里并存很久，没法一次全换掉。一种编码格式要有什么样的规矩，系统的各个部分才能各自升级，又不会互相读坏、写丢？</p></div>
+<ol class="qs">
+  <li>为什么说向前兼容比向后兼容难？除了「忽略不认识的字段」，旧代码还得做到什么？<span class="sec">§0</span></li>
+  <li>在 Protocol Buffers 里，字段名和标签号哪个能改、哪个绝不能动？删掉的字段为什么要把标签号留着？<span class="sec">§1.3</span></li>
+  <li>Avro 的数据里没有任何标识，读的一方凭什么知道每一段是什么？<span class="sec">§1.4</span></li>
+  <li>数据经过数据库、经过服务调用、经过消息代理，各自要哪个方向的兼容？<span class="sec">§2.1</span><span class="sec">§2.2</span><span class="sec">§2.4</span></li>
+</ol>
+
+<h2>这一章的骨架</h2>
+<p>这一章分两半：§1 讲怎么把数据编码成字节，一种格式一种格式地比，落点是它们怎么对待模式的变化；§2 换个角度，讲字节在进程之间怎么流动，每一种流法里谁编码、谁解码、谁先升级。容易乱的是 §1.3 和 §1.4：两种格式都「带模式」，但兼容的规矩完全不同，一个靠数字，一个靠名字加默认值。读的时候把两套规矩分开记。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 400" role="img" aria-label="这一章的骨架：新旧代码和新旧数据同时存在，分出两条线，左边是几类编码格式，右边是数据流动的四种方式，底下贯穿全章的是向后兼容和向前兼容">
+  <rect class="box" x="160" y="8" width="320" height="36" rx="8"/>
+  <text class="t-b" x="320" y="31" text-anchor="middle">新旧代码、新旧数据同时存在 §0</text>
+  <path class="ln" d="M320 44 V60 M160 60 H480 M160 60 V76 M480 60 V76"/>
+  <rect class="b-a" x="10" y="76" width="300" height="34" rx="6"/>
+  <text class="t-b" x="160" y="98" text-anchor="middle">怎么把数据变成字节 §1</text>
+  <rect class="b-a" x="330" y="76" width="300" height="34" rx="6"/>
+  <text class="t-b" x="480" y="98" text-anchor="middle">字节在进程之间怎么流 §2</text>
+  <rect class="box" x="10" y="122" width="300" height="32" rx="6"/>
+  <text x="160" y="143" text-anchor="middle">语言自带的序列化：绑死语言 §1.1</text>
+  <rect class="box" x="10" y="162" width="300" height="32" rx="6"/>
+  <text x="160" y="183" text-anchor="middle">JSON、XML、CSV：类型含糊 §1.2</text>
+  <rect class="b-warn" x="10" y="202" width="300" height="32" rx="6"/>
+  <text x="160" y="223" text-anchor="middle">按标签号：Protocol Buffers §1.3</text>
+  <rect class="b-warn" x="10" y="242" width="300" height="32" rx="6"/>
+  <text x="160" y="263" text-anchor="middle">写者模式 + 读者模式：Avro §1.4</text>
+  <rect class="box" x="10" y="282" width="300" height="32" rx="6"/>
+  <text x="160" y="303" text-anchor="middle">带模式有什么好处 §1.5</text>
+  <rect class="box" x="330" y="122" width="300" height="32" rx="6"/>
+  <text x="480" y="143" text-anchor="middle">经过数据库：写给将来的自己 §2.1</text>
+  <rect class="box" x="330" y="162" width="300" height="32" rx="6"/>
+  <text x="480" y="183" text-anchor="middle">经过服务：REST 与 RPC §2.2</text>
+  <rect class="box" x="330" y="202" width="300" height="32" rx="6"/>
+  <text x="480" y="223" text-anchor="middle">经过工作流：持久执行 §2.3</text>
+  <rect class="box" x="330" y="242" width="300" height="32" rx="6"/>
+  <text x="480" y="263" text-anchor="middle">经过消息：消息代理与 actor §2.4</text>
+  <text class="t-m" x="480" y="300" text-anchor="middle">每一种都问：谁编码、谁解码、谁先升级</text>
+  <path class="ln-d" d="M160 314 V332 M480 306 V332"/>
+  <rect class="b-ok" x="10" y="332" width="620" height="34" rx="6"/>
+  <text x="320" y="354" text-anchor="middle">贯穿全章：向后兼容（新代码读旧数据）· 向前兼容（旧代码读新数据）</text>
+  <text class="t-m" x="320" y="390" text-anchor="middle">左边决定「能不能」兼容，右边决定「要哪个方向」的兼容</text>
+</svg>
+<figcaption>本站画的全章结构。黄色两格是全章最密的地方，也是模拟器演示的内容。</figcaption>
+</figure>
+<p class="lede">边读边填：每行一个问题，读到答案就写一两句。只存在你这台设备的浏览器里，别人看不到。</p>
+<div class="table-wrap"><table class="findit">
+  <tr><th>要找的</th><th>带着这个问题读，找到了就写下来</th></tr>
+  <tr><td>文本格式的坑</td><td><p class="q">数字和二进制数据放进 JSON，各会出什么问题？人们怎么凑合？<span class="sec">§1.2</span></p><input class="note" data-key="05-f1" aria-label="文本格式的坑：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>标签号的规矩</td><td><p class="q">加字段、删字段、改类型，各要守什么规矩？<span class="sec">§1.3</span></p><input class="note" data-key="05-f2" aria-label="标签号的规矩：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>Avro 的规矩</td><td><p class="q">什么样的字段才能加、才能删？改名为什么只有一个方向兼容？<span class="sec">§1.4</span></p><input class="note" data-key="05-f3" aria-label="Avro 的规矩：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>写者模式来源</td><td><p class="q">书里举了三种场合，读的一方各怎么拿到写者模式？<span class="sec">§1.4</span></p><input class="note" data-key="05-f4" aria-label="写者模式来源：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>不重写旧数据</td><td><p class="q">数据库怎么做到改了模式，却不用把所有旧数据重写一遍？<span class="sec">§2.1</span></p><input class="note" data-key="05-f5" aria-label="不重写旧数据：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>RPC 的毛病</td><td><p class="q">网络请求和本地函数调用有哪几处不一样？<span class="sec">§2.2</span></p><input class="note" data-key="05-f6" aria-label="RPC 的毛病：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>持久执行代价</td><td><p class="q">为什么改一个正在跑的工作流的代码很危险？怎么改才安全？<span class="sec">§2.3</span></p><input class="note" data-key="05-f7" aria-label="持久执行代价：你的答案" placeholder="你的答案"></td></tr>
+</table></div>
+<details class="reveal"><summary>读完了？对照我找到的</summary><ul>
+  <li>文本格式的坑：超过 2<sup>53</sup> 的整数在 JavaScript 里丢精度，只好再附一份字符串；二进制通常转成 Base64，体积大约多三分之一。</li>
+  <li>标签号的规矩：新字段用新号；删掉的号永远不再用，可以在模式里保留；改类型可能被截断。</li>
+  <li>Avro 的规矩：只能加、删有默认值的字段；改名靠读者模式里的别名，所以新读旧行、旧读新不行。</li>
+  <li>写者模式来源：大文件在开头写一次；数据库里每条记录带版本号，去模式库里查；网络连接建立时双方协商。</li>
+  <li>不重写旧数据：读的时候把缺的列填成默认值（如 null），重写推迟到合并之类的时机，尽力而为。</li>
+  <li>RPC 的毛病：结果不可预测、可能超时不知结果、重试会重复执行、延迟忽高忽低、参数要编码、跨语言类型要转换。</li>
+  <li>持久执行代价：重放要求按同样顺序发出同样的调用，改顺序就出问题；新代码单独部署，已有实例继续用旧版本。</li>
+</ul></details>
+
+<h2>分节地图</h2>
+<p class="lede">全章约 1.1 万词（不算代码和图注），建议分四次读。第二次（Protocol Buffers 和 Avro）最需要慢读，最好边读边玩下面的模拟器；第三次里 §2.2 很长，但负载均衡那一段和兼容的主线关系不大，可以读快些。</p>
+<ol class="secmap">
+  <li class="sit">第一次坐下<span>§0–§1.2 · 约 2500 词 · 为什么要两个方向的兼容，文本格式的毛病</span></li>
+  <li data-sec="0"><b>Applications inevitably change over time.…<span class="w">约 700 词</span></b><span class="cn">开篇</span><span class="what">新旧代码为什么会同时在跑；向后、向前兼容的定义；旧代码把新字段写丢的风险。</span></li>
+  <li data-sec="1"><b>Formats for Encoding Data<span class="w">约 300 词</span></b><span class="cn">编码数据的格式</span><span class="what">内存里的结构和字节序列两种表示，编码和解码这对词的几个别名。</span></li>
+  <li data-sec="1.1"><b>Language-Specific Formats<span class="w">约 300 词</span></b><span class="cn">语言自带的格式</span><span class="what">Java、Python 自带的序列化方便在哪，又有哪几个深层问题。</span></li>
+  <li data-sec="1.2"><b>JSON, XML, and Binary Variants<span class="w">约 1300 词</span></b><span class="cn">JSON、XML 和它们的二进制变体</span><span class="what">文本格式在数字、二进制上的含糊；JSON Schema 的开放与封闭；二进制 JSON 省了多少。</span></li>
+  <li class="sit">第二次坐下<span>§1.3–§1.5 · 约 2900 词 · 两种带模式的二进制编码，全章的重心</span></li>
+  <li data-sec="1.3"><b>Protocol Buffers<span class="w">约 900 词</span></b><span class="cn">Protocol Buffers（协议缓冲区）</span><span class="what">标签号代替字段名；加字段、删字段、改类型时各守什么规矩。</span></li>
+  <li data-sec="1.4"><b>Avro<span class="w">约 1600 词</span></b><span class="cn">Avro 格式</span><span class="what">数据里只有值。写者模式和读者模式怎么对上，写者模式从哪来，为什么适合自动生成的模式。</span></li>
+  <li data-sec="1.5"><b>The Merits of Schemas<span class="w">约 400 词</span></b><span class="cn">模式的好处</span><span class="what">老想法 ASN.1；带模式的二进制编码比 JSON 多给了什么。</span></li>
+  <li class="sit">第三次坐下<span>§2–§2.2 · 约 3400 词 · 数据经过数据库和服务</span></li>
+  <li data-sec="2"><b>Modes of Dataflow<span class="w">约 200 词</span></b><span class="cn">数据流动的几种方式</span><span class="what">兼容是编码方和解码方之间的关系。后面按数据怎么流来分。</span></li>
+  <li data-sec="2.1"><b>Dataflow Through Databases<span class="w">约 600 词</span></b><span class="cn">经过数据库的数据流</span><span class="what">写数据库就是给将来的自己发消息；新旧格式的数据混在一起时数据库怎么办。</span></li>
+  <li data-sec="2.2"><b>Dataflow Through Services: REST and RPC<span class="w">约 2600 词</span></b><span class="cn">经过服务的数据流：REST 与 RPC</span><span class="what">Web 服务和接口定义；远程调用为什么不该装成本地调用；服务发现；接口怎么演化。</span></li>
+  <li class="sit">第四次坐下<span>§2.3–§3 · 约 2100 词 · 工作流和事件，加小结</span></li>
+  <li data-sec="2.3"><b>Durable Execution and Workflows<span class="w">约 800 词</span></b><span class="cn">持久执行与工作流</span><span class="what">一笔支付要调好几个服务。持久执行怎么做到「只执行一次」，代价是什么。</span></li>
+  <li data-sec="2.4"><b>Event-Driven Architectures<span class="w">约 900 词</span></b><span class="cn">事件驱动的架构</span><span class="what">消息代理比直接调用多了什么；两种分发方式；分布式 actor 框架。</span></li>
+  <li data-sec="3"><b>Summary<span class="w">约 400 词</span></b><span class="cn">小结</span><span class="what">全章回顾。先自己回忆一遍再读它。</span></li>
+</ol>
+
+<h2>先用中文过一遍</h2>
+<h3>两个方向的兼容：新旧代码会一起跑很久</h3>
+<p>改一个功能，常常要给数据加个字段。可代码不能一瞬间全部换掉：服务端通常滚动升级（rolling upgrade），一次换几台，看没出事再换下一批，这期间新旧版本同时在线；手机上的 App 更新不更新，由用户说了算。所以系统里总有新代码在读旧数据，也总有旧代码在读新数据。</p>
+<p>前一种叫向后兼容（backward compatibility），比较好办：写新代码的人知道旧格式长什么样，专门处理就行。后一种叫向前兼容（forward compatibility），难在旧代码写的时候还不知道将来会多出什么。它至少要能跳过不认识的字段；更进一步，旧代码读出一条记录、改了一处再写回去时，还得把那些不认识的字段原样带上，否则新代码写进去的东西就被它悄悄抹掉了。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 260" role="img" aria-label="滚动升级的某一刻：四台服务实例按先后顺序从旧版本换成新版本，此刻两台已经是新版本，两台还是旧版本；用户手机上的 App 一直是旧版本。它们共用一个数据库，新写旧读要向前兼容，旧写新读要向后兼容">
+  <defs><marker id="a5r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="18">滚动升级的某一刻：新旧版本同时在跑</text>
+  <text class="t-m" x="10" y="52">实例 1</text>
+  <rect class="box" x="80" y="34" width="60" height="26" rx="4"/>
+  <rect class="b-a" x="140" y="34" width="260" height="26" rx="4"/>
+  <text class="t-m" x="110" y="52" text-anchor="middle">旧版本</text>
+  <text class="t-m" x="310" y="52" text-anchor="middle">新版本</text>
+  <text class="t-m" x="10" y="86">实例 2</text>
+  <rect class="box" x="80" y="68" width="120" height="26" rx="4"/>
+  <rect class="b-a" x="200" y="68" width="200" height="26" rx="4"/>
+  <text class="t-m" x="10" y="120">实例 3</text>
+  <rect class="box" x="80" y="102" width="220" height="26" rx="4"/>
+  <rect class="b-a" x="300" y="102" width="100" height="26" rx="4"/>
+  <text class="t-m" x="10" y="154">实例 4</text>
+  <rect class="box" x="80" y="136" width="280" height="26" rx="4"/>
+  <rect class="b-a" x="360" y="136" width="40" height="26" rx="4"/>
+  <text class="t-m" x="10" y="196">手机 App</text>
+  <rect class="box" x="80" y="178" width="320" height="26" rx="4"/>
+  <text class="t-m" x="242" y="196">用户没更新，一直是旧版本</text>
+  <path class="ln-d" d="M230 28 V212"/>
+  <text class="t-a" x="230" y="230" text-anchor="middle">此刻：两新、两旧，外加旧 App</text>
+  <text class="t-m" x="80" y="252">时间 →</text>
+  <path class="ln-a" d="M402 47 L428 62 M402 149 L428 74" marker-end="url(#a5r)"/>
+  <rect class="b-warn" x="430" y="48" width="200" height="38" rx="6"/>
+  <text class="t-b" x="530" y="72" text-anchor="middle">共享的数据库</text>
+  <text class="t-m" x="430" y="114">新实例写、旧实例读：</text>
+  <text class="t-a" x="430" y="132">要向前兼容</text>
+  <text class="t-m" x="430" y="160">旧实例写、新实例读：</text>
+  <text class="t-a" x="430" y="178">要向后兼容</text>
+  <text class="t-m" x="430" y="206">旧实例改完写回时：</text>
+  <text class="t-a" x="430" y="224">别把新字段写丢</text>
+</svg>
+<figcaption>本站画的示意图。浅色格是旧版本代码，蓝色格是新版本。滚动升级做完之前，任何时刻都可能是这种混合状态。</figcaption>
+</figure>
+
+<h3>同一条记录，四种写法：字段名、标签号，还是什么都不写</h3>
+<p>把一条记录编码成字节，最直接的是 JSON：每条记录都把字段名写一遍，人能看懂，体积也大，而且数字不分整数和浮点，没有二进制类型。二进制的 JSON 变体（如 MessagePack）把类型和长度换成字节，省得不多，因为字段名还在。</p>
+<p>Protocol Buffers 要求先写模式，模式里给每个字段编一个号（标签号，field tag）。编码时只写「标签号 + 类型 + 值」，字段名根本不进数据，所以字段可以随便改名，标签号却一个也不能动。旧代码读到一个不认识的标签号，靠类型信息知道该跳过几个字节。</p>
+<p>Avro 更进一步：数据里只有一个接一个的值，连标签号都没有。要解码，必须拿着写这份数据时用的那份模式（写者模式，writer's schema），按它的字段顺序一段段往下读。读的程序还有自己期望的模式（读者模式，reader's schema），两者可以不同，Avro 按字段名把它们对上：写者有、读者没有的字段跳过，读者有、写者没有的字段填读者模式里的默认值。于是兼容的规矩变成了「默认值」的规矩。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 290" role="img" aria-label="同一张票的四种编码按字节数画成长条：JSON 42 字节，字段名每条都写；二进制 JSON 31 字节，字段名还在；按标签号编码 15 字节，字段名换成标签号 1、2、3；Avro 12 字节，只有长度和值">
+  <text class="t-b" x="20" y="22">JSON：42 字节，每条记录都带着字段名</text>
+  <rect class="b-warn" x="20" y="30" width="126" height="24"/><text class="t-mono" x="83" y="47" text-anchor="middle">buyer</text>
+  <rect class="box" x="146" y="30" width="112" height="24"/><text class="t-mono" x="202" y="47" text-anchor="middle">lin.w</text>
+  <rect class="b-warn" x="258" y="30" width="98" height="24"/><text class="t-mono" x="307" y="47" text-anchor="middle">seat</text>
+  <rect class="box" x="356" y="30" width="84" height="24"/><text class="t-mono" x="398" y="47" text-anchor="middle">B12</text>
+  <rect class="b-warn" x="440" y="30" width="112" height="24"/><text class="t-mono" x="496" y="47" text-anchor="middle">price</text>
+  <rect class="box" x="552" y="30" width="56" height="24"/><text class="t-mono" x="580" y="47" text-anchor="middle">380</text>
+  <text class="t-b" x="20" y="86">二进制 JSON（如 MessagePack）：31 字节，字段名还在</text>
+  <rect class="b-a" x="20" y="94" width="14" height="24"/><rect class="b-a" x="34" y="94" width="14" height="24"/>
+  <rect class="b-warn" x="48" y="94" width="70" height="24"/><text class="t-mono" x="83" y="111" text-anchor="middle">buyer</text>
+  <rect class="b-a" x="118" y="94" width="14" height="24"/>
+  <rect class="box" x="132" y="94" width="70" height="24"/><text class="t-mono" x="167" y="111" text-anchor="middle">lin.w</text>
+  <rect class="b-a" x="202" y="94" width="14" height="24"/>
+  <rect class="b-warn" x="216" y="94" width="56" height="24"/><text class="t-mono" x="244" y="111" text-anchor="middle">seat</text>
+  <rect class="b-a" x="272" y="94" width="14" height="24"/>
+  <rect class="box" x="286" y="94" width="42" height="24"/><text class="t-mono" x="307" y="111" text-anchor="middle">B12</text>
+  <rect class="b-a" x="328" y="94" width="14" height="24"/>
+  <rect class="b-warn" x="342" y="94" width="70" height="24"/><text class="t-mono" x="377" y="111" text-anchor="middle">price</text>
+  <rect class="b-a" x="412" y="94" width="14" height="24"/>
+  <rect class="box" x="426" y="94" width="28" height="24"/><text class="t-mono" x="440" y="111" text-anchor="middle">380</text>
+  <text class="t-b" x="20" y="150">按标签号（Protocol Buffers）：15 字节</text>
+  <rect class="b-a" x="20" y="158" width="14" height="24"/><text class="t-mono" x="27" y="175" text-anchor="middle">1</text>
+  <rect class="b-a" x="34" y="158" width="14" height="24"/><text class="t-mono" x="41" y="175" text-anchor="middle">5</text>
+  <rect class="box" x="48" y="158" width="70" height="24"/><text class="t-mono" x="83" y="175" text-anchor="middle">lin.w</text>
+  <rect class="b-a" x="118" y="158" width="14" height="24"/><text class="t-mono" x="125" y="175" text-anchor="middle">2</text>
+  <rect class="b-a" x="132" y="158" width="14" height="24"/><text class="t-mono" x="139" y="175" text-anchor="middle">3</text>
+  <rect class="box" x="146" y="158" width="42" height="24"/><text class="t-mono" x="167" y="175" text-anchor="middle">B12</text>
+  <rect class="b-a" x="188" y="158" width="14" height="24"/><text class="t-mono" x="195" y="175" text-anchor="middle">3</text>
+  <rect class="box" x="202" y="158" width="28" height="24"/><text class="t-mono" x="216" y="175" text-anchor="middle">380</text>
+  <text class="t-m" x="246" y="168">1、2、3 是模式里的标签号（和类型挤在一个字节里），</text>
+  <text class="t-m" x="246" y="184">5、3 是字符串的长度</text>
+  <text class="t-b" x="20" y="214">Avro：12 字节，只有长度和值</text>
+  <rect class="b-a" x="20" y="222" width="14" height="24"/><text class="t-mono" x="27" y="239" text-anchor="middle">5</text>
+  <rect class="box" x="34" y="222" width="70" height="24"/><text class="t-mono" x="69" y="239" text-anchor="middle">lin.w</text>
+  <rect class="b-a" x="104" y="222" width="14" height="24"/><text class="t-mono" x="111" y="239" text-anchor="middle">3</text>
+  <rect class="box" x="118" y="222" width="42" height="24"/><text class="t-mono" x="139" y="239" text-anchor="middle">B12</text>
+  <rect class="box" x="160" y="222" width="28" height="24"/><text class="t-mono" x="174" y="239" text-anchor="middle">380</text>
+  <text class="t-m" x="204" y="232">没有写者模式，就不知道哪一段是什么：</text>
+  <text class="t-m" x="204" y="248">380 这两个字节也可能被当成别的类型</text>
+  <rect class="b-warn" x="20" y="266" width="14" height="14"/><text class="t-m" x="40" y="278">字段名</text>
+  <rect class="b-a" x="100" y="266" width="14" height="14"/><text class="t-m" x="120" y="278">类型、标签号或长度</text>
+  <rect class="box" x="260" y="266" width="14" height="14"/><text class="t-m" x="280" y="278">值</text>
+</svg>
+<figcaption>本站画的示意图：一张票（买家 lin.w，座位 B12，票价 380）的四种编码，一格宽度是一个字节。JSON 那条里引号、冒号和逗号也算在字节里。字节数是本站按各格式的规则算的，可以拿模拟器下面的数字对照。</figcaption>
+</figure>
+
+<h3>数据怎么流：判断方向只看读的一方是新还是旧</h3>
+<p>兼容总是两个进程之间的事：一个编码，一个解码。数据经过数据库时，写的进程编码、读的进程解码，读的人可能是将来的自己，也可能是还没升级的另一台实例。数据经过服务调用时，请求由客户端编码、服务端解码，响应反过来。书里给服务调用做了一个简化的假设：服务端先升级，客户端后升级。在这个假设下，请求只要向后兼容，响应只要向前兼容。经过消息代理时，发送方编码、接收方解码，中间的代理不管格式。</p>
+<p>§2.2 后半有一段要单独留心：远程过程调用（RPC）想让一次网络请求看起来和本地函数调用一样。作者用一整串理由说明这条路为什么走不通，其中「超时之后不知道对方做没做」和「重试可能做两遍」会在后面几章反复出现。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 230" role="img" aria-label="两种升级顺序下服务调用需要的兼容方向：服务端先升级时，新服务端读旧客户端的请求要向后兼容，旧客户端读新服务端的响应要向前兼容；新客户端调旧服务端时，两个方向反过来">
+  <defs><marker id="a5s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="160" y="18" text-anchor="middle">常见顺序：服务端先升级</text>
+  <text class="t-b" x="480" y="18" text-anchor="middle">反过来：新客户端调旧服务端</text>
+  <rect class="box" x="10" y="34" width="100" height="56" rx="6"/>
+  <text x="60" y="67" text-anchor="middle">旧客户端</text>
+  <rect class="b-a" x="210" y="34" width="100" height="56" rx="6"/>
+  <text x="260" y="67" text-anchor="middle">新服务端</text>
+  <path class="ln-a" d="M112 52 H206" marker-end="url(#a5s)"/>
+  <text class="t-m" x="160" y="46" text-anchor="middle">请求</text>
+  <path class="ln-a" d="M208 76 H114" marker-end="url(#a5s)"/>
+  <text class="t-m" x="160" y="90" text-anchor="middle">响应</text>
+  <text class="t-m" x="10" y="122">请求：新代码读旧客户端写的</text>
+  <text class="t-a" x="10" y="140">→ 向后兼容</text>
+  <text class="t-m" x="10" y="166">响应：旧客户端读新代码写的</text>
+  <text class="t-a" x="10" y="184">→ 向前兼容</text>
+  <path class="ln-d" d="M320 30 V190"/>
+  <rect class="b-a" x="330" y="34" width="100" height="56" rx="6"/>
+  <text x="380" y="67" text-anchor="middle">新客户端</text>
+  <rect class="box" x="530" y="34" width="100" height="56" rx="6"/>
+  <text x="580" y="67" text-anchor="middle">旧服务端</text>
+  <path class="ln-a" d="M432 52 H526" marker-end="url(#a5s)"/>
+  <text class="t-m" x="480" y="46" text-anchor="middle">请求</text>
+  <path class="ln-a" d="M528 76 H434" marker-end="url(#a5s)"/>
+  <text class="t-m" x="480" y="90" text-anchor="middle">响应</text>
+  <text class="t-m" x="330" y="122">请求：旧服务端读新客户端写的</text>
+  <text class="t-a" x="330" y="140">→ 向前兼容</text>
+  <text class="t-m" x="330" y="166">响应：新客户端读旧服务端写的</text>
+  <text class="t-a" x="330" y="184">→ 向后兼容</text>
+  <text class="t-m" x="320" y="220" text-anchor="middle">规律：读的一方比写的一方新，要向后兼容；比它旧，要向前兼容</text>
+</svg>
+<figcaption>本站画的示意图。蓝色是新版本。书里对服务调用的简化假设是左边那种顺序；右边那种情况，书在 §0 讲 API 的兼容时也列了出来。</figcaption>
+</figure>
+
+<h3>这一章点名的系统</h3>
+<div class="sys">
+  <div><b>Protocol Buffers</b><span class="k">二进制编码库</span> Google 开发，先写模式再生成各语言的代码，数据里用标签号代替字段名。</div>
+  <div><b>Apache Thrift</b><span class="k">二进制编码库</span> 最初由 Facebook 开发，书里说讲 Protocol Buffers 的内容大多也适用于它。</div>
+  <div><b>Apache Avro</b><span class="k">二进制编码格式</span> 2009 年作为 Hadoop 的子项目起步，数据里不带标签号，靠写者模式和读者模式解码。</div>
+  <div><b>MessagePack</b><span class="k">二进制 JSON</span> 把 JSON 编成更紧凑的字节，字段名仍然写在数据里。</div>
+  <div><b>JSON Schema</b><span class="k">模式语言</span> 给 JSON 规定类型和取值约束；默认允许模式里没写的字段出现。</div>
+  <div><b>OpenAPI</b><span class="k">服务接口定义</span> 又叫 Swagger，描述收发 JSON 的 Web 服务的端点和数据模型。</div>
+  <div><b>gRPC</b><span class="k">RPC 框架</span> 用 Protocol Buffers 写服务定义，再生成服务端骨架和客户端代码。</div>
+  <div><b>Temporal</b><span class="k">工作流引擎</span> 提供持久执行：把每次调用记进日志，失败后重放时跳过已经成功的步骤。</div>
+  <div><b>Confluent Schema Registry</b><span class="k">模式注册表</span> 和 Kafka 搭配，存各个模式版本、检查兼容性，书里举它作按版本号查写者模式的例子。</div>
+  <div><b>Istio、Linkerd</b><span class="k">服务网格</span> 书里说在 Kubernetes 这类变化频繁的环境里常用，负责负载均衡、加密和观测。</div>
+</div>
+
+<div class="table-wrap"><table class="terms">
+  <tr><th>英文</th><th>中文</th><th>一句话</th></tr>
+  <tr><td>encoding / decoding</td><td>编码 / 解码</td><td>内存里的结构和字节序列之间的转换。也叫序列化、反序列化，书里避开这个词，因为第 8 章它另有所指（§1）。</td></tr>
+  <tr><td>rolling upgrade</td><td><a class="term" href="../glossary.html#g-rolling-upgrade">滚动升级</a></td><td>一次只给几个节点换新版本，看没问题再往下换，不停服（§0）。</td></tr>
+  <tr><td>backward compatibility</td><td><a class="term" href="../glossary.html#g-backward-compatibility">向后兼容</a></td><td>新代码能读旧代码写的数据（§0）。</td></tr>
+  <tr><td>forward compatibility</td><td><a class="term" href="../glossary.html#g-forward-compatibility">向前兼容</a></td><td>旧代码能读新代码写的数据（§0）。</td></tr>
+  <tr><td>schema evolution</td><td><a class="term" href="../glossary.html#g-schema-evolution">模式演化</a></td><td>模式随时间改变，同时保持两个方向的兼容（§1.3）。</td></tr>
+  <tr><td>field tag</td><td>标签号</td><td>Protocol Buffers 模式里给每个字段编的号，编码时代替字段名（§1.3）。</td></tr>
+  <tr><td>writer’s schema</td><td>写者模式</td><td>Avro 里编码这份数据时用的那一版模式，解码时必须拿到（§1.4）。</td></tr>
+  <tr><td>reader’s schema</td><td>读者模式</td><td>读数据的程序期望的模式，可以比写者模式新或旧（§1.4）。</td></tr>
+  <tr><td>union type</td><td>联合类型</td><td>Avro 里一个字段可以是几种类型之一；想让字段可为空，就要把 null 列进去（§1.4）。</td></tr>
+  <tr><td>IDL</td><td>接口定义语言</td><td>描述数据结构或服务接口的语言，工具据此生成代码和文档（§1.3、§2.2）。</td></tr>
+  <tr><td>RPC</td><td><a class="term" href="../glossary.html#g-rpc">远程过程调用</a></td><td>让网络请求看起来像调用本地函数的做法（§2.2）。</td></tr>
+  <tr><td>location transparency</td><td>位置透明</td><td>调用方看不出对方在本地还是在远程（§2.2）。</td></tr>
+  <tr><td>idempotence</td><td><a class="term" href="../glossary.html#g-idempotence">幂等</a></td><td>同一个操作做一次和做多次，结果一样；重试安全的前提（§2.2）。</td></tr>
+  <tr><td>durable execution</td><td>持久执行</td><td>记下工作流里每一步的调用和结果，失败后重放，已成功的步骤不再真的执行（§2.3）。</td></tr>
+  <tr><td>message broker</td><td><a class="term" href="../glossary.html#g-message-broker">消息代理</a></td><td>发送方和接收方之间暂存消息的中间件（§2.4）。</td></tr>
+</table></div>
+
+<h2>动手：模拟器</h2>
+<p>先猜：按标签号编码，新模式删掉 seat、加一个字段 vip，而且 vip 用回 seat 留下的标签 2。新代码读一条旧数据，会报错吗？如果不报错，读出来的 vip 是什么？猜好了，在模拟器里依次点「删字段 seat」「加字段 vip」「vip 用 seat 的旧标签 2」验证。</p>
+<div class="sim" id="sim-05">
+  <div class="sim-head"><span class="tag">模拟器</span><h3>模式演化：新旧代码能不能互读</h3><p class="desc">旧模式描述一张票：买家 buyer、座位 seat、票价 price。用上面一排按钮把它改成新模式，看新代码读旧数据、旧代码读新数据各读出什么，再看旧代码改了票价写回之后，新字段还在不在。先从「加字段 vip」开始。</p></div>
+  <div class="sim-body">
+    <div class="controls">
+      <label>编码 <select data-r="mode"><option value="tag">按标签号（Protocol Buffers 式）</option><option value="name">按字段名对上（Avro 式）</option></select></label>
+      <span class="sep"></span>
+      <button data-a="add" aria-pressed="false">加字段 vip</button>
+      <button data-a="drop" aria-pressed="false">删字段 seat</button>
+      <button data-a="rename" aria-pressed="false">price 改名 amount</button>
+      <button data-a="reuse" aria-pressed="false">vip 用 seat 的旧标签 2</button>
+      <button data-a="reset">重置</button>
+    </div>
+    <div class="controls">
+      <label><input data-r="vipdef" type="checkbox"> vip 带默认值「普通」</label>
+      <label><input data-r="seatdef" type="checkbox"> 旧模式里 seat 带默认值「现场分配」</label>
+      <label><input data-r="keep" type="checkbox" checked> 旧代码保留不认识的字段</label>
+    </div>
+    <div class="stage" data-r="stage"></div>
+    <div class="narrate" data-r="say">旧模式和新模式现在一模一样，两个方向都能读。先点「加字段 vip」。</div>
+    <div class="stats" data-r="stats"></div>
+  </div>
+</div>
+<ol class="qs">
+  <li>按标签号：点「加字段 vip」，看两个方向各读出什么；再取消「旧代码保留不认识的字段」，看最后一行，旧代码写回之后 vip 去哪了。</li>
+  <li>换成按字段名：加字段 vip，不勾「vip 带默认值」，哪个方向坏了？勾上再看。然后点「删字段 seat」，勾不勾「旧模式里 seat 带默认值」差在哪？同样的操作在按标签号的编码下为什么一直不报错？</li>
+  <li>「price 改名 amount」在两种编码下各会怎样？留意下面的字节数：改名之后，二进制的字节数变了吗？JSON 的呢？</li>
+</ol>
+
+<h2>词与短语</h2>
+<p class="lede">词条按在书里出现的顺序排，按节分组；读一节之前先把这一节的过一遍，读的时候就不用停。斜体小字是原句里连续的几个词，在电子书里搜它就能找到那一句。标着「每个字都认识」的，是字面意思会把你带偏的。行话（schema evolution、idempotence 这类）不在这里，在上面的术语表里。</p>
+
+<h3 class="sec-head" id="s0">§0 <span class="first">Applications inevitably change over time.…</span></h3>
+<div class="entry trap"><div class="en">work your way through</div><div class="loc" data-p="7">… working your way through all the nodes …</div><div class="zh">一个一个地推进，直到做完</div><div class="note">work one’s way through 是「一点点挨个过一遍」，和「工作」无关。</div></div>
+<div class="entry trap"><div class="en">at the mercy of</div><div class="loc" data-p="8">… you’re at the mercy of the user, …</div><div class="zh">只能听凭……摆布</div><div class="note">客户端什么时候升级，开发者说了不算。</div></div>
+<div class="entry"><div class="en">intact</div><div class="loc" data-p="16">… to keep the new field intact, …</div><div class="zh">原封不动的</div></div>
+
+<h3 class="sec-head" id="s1">§1 <span class="first">Formats for Encoding Data</span></h3>
+<div class="entry trap"><div class="en">overload a word</div><div class="loc" data-p="23">… To avoid overloading the word, …</div><div class="zh">让一个词身兼几个意思</div><div class="note">和函数「重载」是同一个词。serialization 在第 8 章讲事务时另有意思，所以作者改用 encoding。</div></div>
+<div class="entry"><div class="en">a myriad</div><div class="loc" data-p="25">… there are a myriad libraries and …</div><div class="zh">数不清的</div></div>
+
+<h3 class="sec-head" id="s1.1">§1.1 <span class="first">Language-Specific Formats</span></h3>
+<div class="entry trap"><div class="en">commit oneself to</div><div class="loc" data-p="28">… committing yourself to your current programming language …</div><div class="zh">把自己绑定在……上</div><div class="note">不是 git 的 commit，是「许下承诺、从此脱不了身」。</div></div>
+<div class="entry"><div class="en">preclude</div><div class="loc" data-p="28">… and precluding integrating your systems …</div><div class="zh">使……不可能、排除</div></div>
+<div class="entry trap"><div class="en">afterthought</div><div class="loc" data-p="30">… Versioning data is often an afterthought …</div><div class="zh">事后才补上的东西</div><div class="note">设计时没考虑，出了问题才想起来。下一段又用了一次。</div></div>
+<div class="entry"><div class="en">notorious for</div><div class="loc" data-p="31">… is notorious for its bad performance …</div><div class="zh">因……而出了名（坏名声）</div></div>
+<div class="entry"><div class="en">bloated</div><div class="loc" data-p="31">… bad performance and bloated encoding.</div><div class="zh">臃肿的</div></div>
+<div class="entry"><div class="en">transient</div><div class="loc" data-p="32">… other than very transient purposes.</div><div class="zh">临时的、转瞬即逝的</div></div>
+
+<h3 class="sec-head" id="s1.2">§1.2 <span class="first">JSON, XML, and Binary Variants</span></h3>
+<div class="entry trap"><div class="en">contender</div><div class="loc" data-p="33">… JSON and XML are the obvious contenders: …</div><div class="zh">（明摆着的）候选者</div><div class="note">本义是参赛者、竞争者；这里指「首先会想到的那几个选项」。</div></div>
+<div class="entry"><div class="en">superficial</div><div class="loc" data-p="34">… Besides the superficial syntactic issues, …</div><div class="zh">表面的、不触及实质的</div></div>
+<div class="entry trap"><div class="en">get around</div><div class="loc" data-p="38">… people get around this limitation …</div><div class="zh">绕过（限制）</div></div>
+<div class="entry trap"><div class="en">hacky</div><div class="loc" data-p="38">… it’s somewhat hacky and increases …</div><div class="zh">凑合的、不太体面的</div><div class="note">程序员说的 hack 常指「能用但不优雅的临时招数」，不是「黑客攻击」。</div></div>
+<div class="entry trap"><div class="en">good enough</div><div class="loc" data-p="41">… are good enough for many purposes.</div><div class="zh">够用</div><div class="note">言下之意是「谈不上好，但够用」。</div></div>
+<div class="entry trap"><div class="en">outweigh</div><div class="loc" data-p="41">… anything outweighs most other concerns.</div><div class="zh">比……更要紧</div><div class="note">作者在打趣：让几家机构对任何事达成一致都太难，格式好不好看反倒是小事。</div></div>
+<div class="entry trap"><div class="en">make for</div><div class="loc" data-p="47">… Such features also make for unwieldy definitions.</div><div class="zh">造成、导致</div><div class="note">make for 在这里不是「朝……走去」。unwieldy 是笨重、难驾驭。</div></div>
+<div class="entry"><div class="en">a profusion of</div><div class="loc" data-p="48">… a profusion of binary encodings for JSON …</div><div class="zh">大量涌现的</div></div>
+<div class="entry trap"><div class="en">to name a few</div><div class="loc" data-p="48">… and Smile, to name a few) …</div><div class="zh">仅举几例</div><div class="note">前面列了八个，还说只是「举几个」，言下之意这类格式多得是。</div></div>
+<div class="entry trap"><div class="en">niche</div><div class="loc" data-p="48">… been adopted in various niches, …</div><div class="zh">小众领域、特定场合</div></div>
+<div class="entry trap"><div class="en">in case you’re wondering</div><div class="loc" data-p="54">… In case you’re wondering what happens …</div><div class="zh">你要是好奇的话</div><div class="note">不是「以防」，是作者顺手回答读者可能冒出来的问题。</div></div>
+
+<h3 class="sec-head" id="s1.3">§1.3 <span class="first">Protocol Buffers</span></h3>
+<div class="entry trap"><div class="en">spell out</div><div class="loc" data-p="66">… having to spell out the field name.</div><div class="zh">完整写出来</div><div class="note">spell out 不只是「拼写」，常指「一五一十地写明」。</div></div>
+
+<h3 class="sec-head" id="s1.4">§1.4 <span class="first">Avro</span></h3>
+<div class="entry"><div class="en">a good fit for</div><div class="loc" data-p="75">… not being a good fit for …</div><div class="zh">适合</div></div>
+<div class="entry trap"><div class="en">could just as well be</div><div class="loc" data-p="82">… could just as well be an integer …</div><div class="zh">同样也可能是</div><div class="note">just as well 在这里是「同样可能」；it’s just as well that… 才是「幸好」。</div></div>
+<div class="entry trap"><div class="en">gloss over</div><div class="loc" data-p="97">… We’ve glossed over an important question: …</div><div class="zh">一笔带过、略过不谈</div></div>
+<div class="entry"><div class="en">negate</div><div class="loc" data-p="97">… negating all the space savings from …</div><div class="zh">抵消、化为乌有</div></div>
+<div class="entry"><div class="en">aforementioned</div><div class="loc" data-p="107">… avoid the aforementioned problems with textual formats …</div><div class="zh">前面提到的</div></div>
+
+<h3 class="sec-head" id="s1.5">§1.5 <span class="first">The Merits of Schemas</span></h3>
+<div class="entry trap"><div class="en">by no means</div><div class="loc" data-p="111">… are by no means new.</div><div class="zh">绝不是、一点也不</div></div>
+<div class="entry"><div class="en">viable</div><div class="loc" data-p="113">… are also a viable option.</div><div class="zh">可行的</div></div>
+<div class="entry trap"><div class="en">diverge from reality</div><div class="loc" data-p="115">… may easily diverge from reality) …</div><div class="zh">和实际情况对不上</div><div class="note">文档写一回事，代码早就是另一回事了。</div></div>
+<div class="entry trap"><div class="en">concurrent</div><div class="loc" data-p="118">… the number of concurrent schema formats …</div><div class="zh">同时并存的</div><div class="note">不是「并发」：指同一时期在用的几种模式格式。</div></div>
+
+<h3 class="sec-head" id="s2.1">§2.1 <span class="first">Dataflow Through Databases</span></h3>
+<div class="entry trap"><div class="en">your future self</div><div class="loc" data-p="122">… sending a message to your future self.</div><div class="zh">将来的你自己</div><div class="note">比喻：今天写进数据库的东西，是留给明天升级后的程序读的。</div></div>
+<div class="entry trap"><div class="en">outlive</div><div class="loc" data-p="126">… summed up as data outlives code.</div><div class="zh">比……活得久</div><div class="note">代码几分钟就换完了，五年前写的数据还按当年的格式躺着。</div></div>
+<div class="entry trap"><div class="en">on a best-effort basis</div><div class="loc" data-p="127">… asynchronously and on a best-effort basis.</div><div class="zh">尽力而为（不打包票）</div></div>
+<div class="entry trap"><div class="en">remains a research problem</div><div class="loc" data-p="128">… migrations remains a research problem.</div><div class="zh">还是个没解决的研究课题</div><div class="note">说得很克制，意思是眼下没有现成的好办法。</div></div>
+
+<h3 class="sec-head" id="s2.2">§2.2 <span class="first">Dataflow Through Services: REST and RPC</span></h3>
+<div class="entry trap"><div class="en">at least in theory</div><div class="loc" data-p="133">… access any website (at least in theory!).</div><div class="zh">至少理论上如此</div><div class="note">括号里加感叹号是作者在打趣：实际上并不总是这样。</div></div>
+<div class="entry trap"><div class="en">misnomer</div><div class="loc" data-p="137">… is perhaps a slight misnomer, …</div><div class="zh">名不副实的叫法</div><div class="note">叫 web service，却不只用在网页上。</div></div>
+<div class="entry trap"><div class="en">incarnation</div><div class="loc" data-p="148">… merely the latest incarnation of a long line …</div><div class="zh">（同一类东西的）最新化身</div><div class="note">言下之意：Web 服务是一长串同类技术里最新的一个，前面那些大多热闹过一阵，后来都暴露出严重的问题。</div></div>
+<div class="entry"><div class="en">hype</div><div class="loc" data-p="148">… received a lot of hype but …</div><div class="zh">炒作、热捧</div></div>
+<div class="entry"><div class="en">plagued by</div><div class="loc" data-p="148">… are also plagued by complexity …</div><div class="zh">饱受……之苦</div></div>
+<div class="entry trap"><div class="en">wildly</div><div class="loc" data-p="153">… its latency is also wildly variable: …</div><div class="zh">极其、剧烈地</div><div class="note">程度副词，不是「野蛮地」。</div></div>
+<div class="entry trap"><div class="en">there’s no point</div><div class="loc" data-p="156">… there’s no point trying to make …</div><div class="zh">做……没有意义</div></div>
+<div class="entry trap"><div class="en">best served with</div><div class="loc" data-p="171">… are best served with software load balancers.</div><div class="zh">最适合用……</div><div class="note">be best served by/with 是「用……最合适」，不是「被服务得最好」。</div></div>
+
+<h3 class="sec-head" id="s2.3">§2.3 <span class="first">Durable Execution and Workflows</span></h3>
+<div class="entry trap"><div class="en">not without its challenges</div><div class="loc" data-p="188">… Temporal are not without their challenges.</div><div class="zh">也有不少难处</div><div class="note">双重否定往轻里说，实际意思是「问题不少」，后面紧接着就列了几条。</div></div>
+<div class="entry"><div class="en">brittle</div><div class="loc" data-p="188">… This makes code changes brittle; …</div><div class="zh">脆弱的、一碰就坏的</div></div>
+
+<h3 class="sec-head" id="s2.4">§2.4 <span class="first">Event-Driven Architectures</span></h3>
+<div class="entry trap"><div class="en">sends it and forgets about it</div><div class="loc" data-p="198">… simply sends it and then forgets about it.</div><div class="zh">发出去就不管了</div><div class="note">行话叫 fire-and-forget。</div></div>
+<div class="entry trap"><div class="en">landscape</div><div class="loc" data-p="199">… the landscape of message brokers was dominated …</div><div class="zh">格局、整体面貌</div><div class="note">不是「风景」。</div></div>
+
+<h3 class="sec-head" id="s3">§3 <span class="first">Summary</span></h3>
+<div class="entry"><div class="en">with a bit of care</div><div class="loc" data-p="224">… with a bit of care, …</div><div class="zh">稍加小心</div></div>
+<div class="entry trap"><div class="en">May your …</div><div class="loc" data-p="224">… May your application’s evolution be rapid …</div><div class="zh">祝你的……</div><div class="note">May 放在句首是祝愿句式，「愿……」，不是「也许」。</div></div>
+
+<div class="gate"><b>到这里先停下，去读原书</b><p>下面是读完再看的：你的预测对不对、几道换成你来选的判断题、值得细读的句子和理解检查。先看了，读书时就只是在找答案。</p></div>
+
+<h2>读完：回到你的预测</h2>
+<div class="payoff" data-bet="05-a"><div class="mine"></div>
+<p>书里的答案是第三项（§0、§1.3）。Protocol Buffers 的旧代码读到不认识的标签号不会报错：每个字段带着类型，解析器知道跳过几个字节，也能把这些字节留着。但能不能活到写回，要看应用把记录解码成什么：如果解码成一个只认识旧字段的对象，写回时 coupon 就没了。作者希望的行为是旧代码原样保留新字段，即使它看不懂。§2.4 又提了一次：消费者把消息转发到别的主题时，同样要留住不认识的字段。想一想：如果换成 Avro，旧代码用自己的模式解码、再用自己的模式写回，结果会一样吗？（模拟器里可以试。）</p></div>
+<div class="payoff" data-bet="05-b"><div class="mine"></div>
+<p>书里的答案是第二项（§1.4）。Avro 按字段名对上：旧代码读新数据时，vip 只出现在写者模式里，跳过就行；新代码读旧数据时，读者模式要 vip，写者模式里没有，只能用读者模式里的默认值，可偏偏没给，于是读不了。所以书里的规矩是：只能加、删有默认值的字段。很多人直觉以为坏的是「旧读新」，因为「旧代码不认识新字段」听起来更危险。想一想：如果是删掉一个没有默认值的字段，坏的是哪个方向？</p></div>
+
+<h2>判断题：换成你来选</h2>
+<p class="lede">场景都是本站编的。先选，再看解释；解释里写了对应的节号，拿不准就回原书看那一节。</p>
+<p class="quiz-score"></p>
+<div class="mcq" data-answer="2"><div class="q">每天导出的数据该用哪种格式？<span class="sec">§1.1</span><span class="sec">§1.4</span></div>
+  <p class="ctx">场景：一个票务系统每天凌晨把 MySQL 里的几十张表导出成文件，给数据团队分析。业务改得勤，表结构每周都在加列、删列；导出程序想从表结构自动生成编码用的模式，不想每次手工维护。</p>
+  <div class="opts"><button>用 Java 自带的序列化，导出程序本来就是 Java 写的</button><button>Protocol Buffers：每次加列时给新列分配下一个标签号</button><button>Avro：每次运行都从表结构生成模式，列名直接当字段名</button><button>CSV，再附一份手写的列说明文档</button></div>
+  <div class="explain"><p>书里专门拿这个场景说明 Avro 的长处：模式里没有标签号，字段按名字对上，导出程序每次从表结构重新生成模式就行，读的一方照样能和旧模式对上。用 Protocol Buffers 就得有人维护「列名到标签号」的对应，还不能把用过的号再分出去。Java 自带的序列化把数据绑死在 Java 上，数据团队未必用 Java；CSV 没有模式，加删列都要手工处理，手写的文档也容易和实际脱节。</p></div></div>
+<div class="mcq" data-answer="1"><div class="q">这次故障最可能的原因是什么？<span class="sec">§1.3</span></div>
+  <p class="ctx">场景：会员服务用 Protocol Buffers 存会员档案。半年前删掉了字段 referrer（推荐人的用户 ID，标签 7）。这周新加字段 nickname，开发顺手用了空着的 7。上线后没有任何报错，但一批老会员的昵称显示成了一串用户 ID。</p>
+  <div class="opts"><button>新旧服务用的 protobuf 库版本不一致</button><button>新字段复用了删掉字段的标签号，老数据里标签 7 的值被当成昵称读了出来</button><button>nickname 没有默认值，新代码读老数据时出错</button><button>字段改了名，旧代码按名字找不到</button></div>
+  <div class="explain"><p>数据里只有标签号，没有字段名。老档案里标签 7 存的是推荐人 ID，新代码按新模式把 7 解释成昵称，类型又都是字符串，所以一声不吭地读错了。书里的规矩是删掉的标签号永远不能再用，可以在模式里把它保留起来防止有人忘记。Protocol Buffers 里改名本来就不影响数据；proto3 的字段缺了就填类型的默认值（空字符串、0），不会因为默认值报错。</p></div></div>
+<div class="mcq" data-answer="3"><div class="q">按书里的假设，这次接口改动需要哪种兼容？<span class="sec">§2.2</span></div>
+  <p class="ctx">场景：公司内部的库存服务被二十个下游服务调用。这次要给查询响应加一个字段 warehouse，给请求加一个可选参数 region。照惯例，库存服务自己先上线，下游各团队再陆续升级。</p>
+  <div class="opts"><button>请求和响应都只要向后兼容</button><button>请求要向前兼容，响应要向后兼容</button><button>只要响应向后兼容，请求不用管</button><button>请求要向后兼容，响应要向前兼容</button></div>
+  <div class="explain"><p>服务端先升级，所以有一段时间是新服务端处理旧客户端的请求（新代码读旧数据，向后兼容），旧客户端读新服务端的响应（旧代码读新数据，向前兼容）。书里正是做了「服务端先升级、客户端后升级」这个简化假设。加可选参数、给响应加字段，通常被认为是不破坏兼容的改动，前提是旧客户端会忽略响应里不认识的字段。</p></div></div>
+<div class="mcq" data-answer="0"><div class="q">网页上的订单号为什么偶尔对不上？<span class="sec">§1.2</span></div>
+  <p class="ctx">场景：订单号是 64 位整数，接口用 JSON 数字返回。后端日志里的订单号都对，网页前端显示的订单号却偶尔末几位不一样，而且只发生在号码特别大的订单上。</p>
+  <div class="opts"><button>大于 2<sup>53</sup> 的整数被 JavaScript 当成双精度浮点数解析，丢了精度；接口应同时给出字符串形式</button><button>数据库的 bigint 溢出了</button><button>JSON 里的中文字符把字节对齐打乱了</button><button>接口用了 gzip 压缩，解压时出错</button></div>
+  <div class="explain"><p>JSON 不区分整数和浮点数，也不规定精度。JavaScript 用双精度浮点数存数字，超过 2<sup>53</sup> 的整数没法精确表示。书里举的例子是一家大网站的帖子 ID：接口里每个 ID 写两遍，一遍数字一遍字符串。后端日志是对的，说明数据库没溢出；JSON 是文本，没有字节对齐；gzip 出错会整个解析失败，不会只错末几位。</p></div></div>
+<div class="mcq" data-answer="2"><div class="q">怎么改这个工作流最安全？<span class="sec">§2.3</span></div>
+  <p class="ctx">场景：退款流程用持久执行框架写成工作流，眼下有几千个实例在跑，有的停在人工审核上，要等好几天。你想在「扣回积分」和「退款到卡」之间插一步风控检查。</p>
+  <div class="opts"><button>直接改工作流代码，重启执行器，所有实例都走新流程</button><button>直接改代码，但给风控检查生成一个随机的请求 ID，免得重复</button><button>把改动作为新版本部署：已经在跑的实例继续用旧代码，新触发的才用新代码</button><button>先把所有在跑的实例取消，再上线新代码</button></div>
+  <div class="explain"><p>持久执行靠重放恢复：它记下每次调用的顺序和结果，重放时要求代码按同样的顺序发出同样的调用。往中间插一步，正在跑的实例一重放就对不上。书里的建议是新代码单独部署，已有实例继续用旧版本。随机 ID 是另一个坑：工作流代码要确定性，随机数要用框架提供的版本。全部取消会让几千笔退款中途停下，要人工收拾。</p></div></div>
+
+<h2>值得停下来的句子</h2>
+<blockquote class="quote">the five-year-old data will still be there, in the original encoding, unless you have explicitly rewritten it since then.<cite>— §2.1。本站译：五年前的数据还会在那里，还是当初的编码，除非你后来特意把它重写过。</cite></blockquote>
+<p>这句话把「兼容」从一个部署期间的临时问题，变成了一个长期问题。代码几分钟就能全部换掉，所以容易以为新旧并存只是升级那一阵子的事；数据不会自己升级，它让「新代码读旧数据」成了每一天都在发生的事。§2.1 后面讲数据库怎么靠读时填默认值、合并时顺手重写来应付，都是从这句话出发的。</p>
+<blockquote class="quote">there’s no point trying to make a remote service look too much like a local object in your programming language<cite>— §2.2。本站译：想让远程服务看起来太像你编程语言里的一个本地对象，是没有意义的。</cite></blockquote>
+<p>这是作者对几十年 RPC 技术的判断。前面列的每一条差别（超时、重试、延迟、参数编码、类型转换）单看都是工程细节，合起来说明网络调用是另一种东西。留意作者的措辞是「太像」：不是不要 RPC 框架，而是别让它把网络的失败方式藏起来。第 9 章还会接着讲这些失败。</p>
+
+<h2>检查一下理解</h2>
+<details class="check"><summary>1.（§0）服务端和客户端，各是什么原因让新旧代码同时存在？</summary><p>服务端常用滚动升级，一次换几个节点，换完之前新旧版本同时在线。客户端要等用户自己安装更新，旧版本可能用很久。</p></details>
+<details class="check"><summary>2.（§1.1）语言自带的序列化，除了绑死一种语言，还有什么更危险的问题？</summary><p>解码时要能实例化任意的类。攻击者如果能让程序解码一段他构造的字节，就可能借此在服务器上执行任意代码。</p></details>
+<details class="check"><summary>3.（§1.2）把二进制数据塞进 JSON，常见做法是什么？代价是什么？</summary><p>转成 Base64 文本，再靠模式说明这个字段要按 Base64 解。能用，但不太体面，数据大约变大三分之一。</p></details>
+<details class="check"><summary>4.（§1.3）为什么字段名可以改，标签号却不能改？</summary><p>编码后的数据里只有标签号，从不出现字段名，改名不影响任何已有数据。标签号一改，所有已经写下的数据就对不上号了。</p></details>
+<details class="check"><summary>5.（§1.4）在 Avro 里给字段改名，为什么是向后兼容而不是向前兼容？</summary><p>新的读者模式可以给新名字加上旧名字作别名，读旧数据时按别名对上。旧代码的读者模式里没有新名字，读新数据时找不到这个字段。</p></details>
+<details class="check"><summary>6.（§2.1）关系数据库加一个默认为空的列，为什么不用重写整张表？</summary><p>旧行照旧存着，读的时候发现缺这一列，就当它是 null 填上。整个库看起来像是用同一个模式写的，底下其实混着各个时期的编码。</p></details>
+<details class="check"><summary>7.（§2.2）一个网络请求超时了，为什么不能直接重试了事？</summary><p>超时只说明没收到响应，不知道请求到没到、做没做。可能对方已经做完、只是响应丢了，重试就会做第二遍，除非协议里有去重（幂等）的机制。</p></details>
+<details class="check"><summary>8.（§2.4）消息代理比直接调用接收方多了哪些好处？说出三个。</summary><p>接收方忙或不在时能当缓冲；接收方崩溃后能重新投递；发送方不用知道接收方的地址；同一条消息能发给好几个接收方；发送方和接收方在逻辑上解耦。</p></details>
+<p>用一句话说这一章（写给一个没读过的朋友）：</p>
+<textarea class="note" data-key="05-oneline" placeholder="比如：……"></textarea>
+
+<h2>精彩回顾</h2>
+<p class="recall-line"><b>一句话：</b>新旧代码和新旧数据总会并存，编码格式的价值，在于让读的一方无论比写的一方新还是旧，都读得通、不写丢。</p>
+<div class="recall">
+  <div class="item"><b>新读旧，旧读新</b><p>向后兼容是新代码读旧数据，向前兼容是旧代码读新数据。判断要哪一种，只看读的一方比写的一方新还是旧。</p><span class="sec">§0</span></div>
+  <div class="item"><b>别把新字段写丢</b><p>旧代码读、改、写回一条新记录时，要把看不懂的字段原样带上。解码成只认识旧字段的对象，新数据就悄悄没了。</p><span class="sec">§0</span></div>
+  <div class="item"><b>标签号是命根子</b><p>Protocol Buffers 的数据里只有标签号。字段名随便改，标签号不能改；删掉的号永远不再用。</p><span class="sec">§1.3</span></div>
+  <div class="item"><b>两份模式</b><p>Avro 的数据里只有值。解码要拿着写者模式，再按字段名对到读者模式上，缺了的填默认值。所以只能加、删有默认值的字段。</p><span class="sec">§1.4</span></div>
+  <div class="item"><b>数据比代码活得久</b><p>代码几分钟换完，五年前的数据还按当年的格式躺着。数据库靠读时填默认值，免得一改模式就重写全部数据。</p><span class="sec">§2.1</span></div>
+  <div class="item"><b>超时之后不知道</b><p>本地调用要么返回要么抛异常；网络请求还可能超时，你不知道对方做没做，重试可能做两遍。</p><span class="sec">§2.2</span></div>
+  <div class="item"><b>重放不能换顺序</b><p>持久执行靠按原顺序重放来跳过做过的步骤。改工作流代码要另起版本，已经在跑的实例继续走旧代码。</p><span class="sec">§2.3</span></div>
+</div>
+
+</main>
+<script>
+(() => {
+  const root = document.getElementById("sim-05"), h = window.DD.h;
+  const $ = (r) => root.querySelector(`[data-r="${r}"]`);
+  // 两条记录的「真实内容」，按字段的身份（id）存：改名不改身份
+  const OLD = { buyer: "lin.w", seat: "B12", price: 380 };
+  const NEW = { buyer: "zhao.k", seat: "C07", price: 520, vip: "gold" };
+  const NEWPRICE = 560;
+  let S;
+  function reset() { S = { ch: { add: false, drop: false, rename: false, reuse: false } }; }
+  const mode = () => $("mode").value;
+  const disp = (v) => (v === "" ? "空串" : v === undefined ? "（无）" : String(v));
+  function schemas() {
+    const v1 = [
+      { id: "buyer", name: "buyer", tag: 1, type: "string" },
+      { id: "seat", name: "seat", tag: 2, type: "string", def: $("seatdef").checked ? "现场分配" : undefined },
+      { id: "price", name: "price", tag: 3, type: "int" },
+    ];
+    let v2 = v1.map((f) => ({ ...f }));
+    if (S.ch.drop) v2 = v2.filter((f) => f.id !== "seat");
+    if (S.ch.rename) { const p = v2.find((f) => f.id === "price"); p.name = "amount"; p.alias = "price"; }
+    if (S.ch.add) v2.push({ id: "vip", name: "vip", tag: S.ch.reuse ? 2 : 4, type: "string", def: $("vipdef").checked ? "普通" : undefined });
+    return { v1, v2 };
+  }
+  const dupTag = (sc) => sc.find((f, i) => sc.some((g, j) => j < i && g.tag === f.tag));
+  // 用某一版模式写一条记录：每个字段一项，带着标签号、名字和它真正的身份
+  const write = (sc, vals) => ({ sc, items: sc.filter((f) => vals[f.id] !== undefined).map((f) => ({ tag: f.tag, name: f.name, type: f.type, id: f.id, v: vals[f.id] })) });
+  function decode(enc, R) {
+    let out, used;
+    if (mode() === "tag") {
+      out = R.map((f) => {
+        const e = enc.items.find((x) => x.tag === f.tag);
+        if (!e) return { f, v: f.type === "int" ? 0 : "", st: "def" };
+        if (e.id !== f.id || e.type !== f.type) return { f, v: e.v, st: "wrong", from: e.id };
+        return { f, v: e.v, st: "ok" };
+      });
+      used = (x) => R.some((f) => f.tag === x.tag);
+    } else {
+      out = R.map((f) => {
+        const e = enc.items.find((x) => x.name === f.name || (f.alias && x.name === f.alias));
+        if (e) return { f, v: e.v, st: "ok", via: e.name !== f.name ? e.name : null };
+        if (f.def !== undefined) return { f, v: f.def, st: "def" };
+        return { f, st: "err" };
+      });
+      used = (x) => R.some((f) => f.name === x.name || f.alias === x.name);
+    }
+    const skipped = enc.items.filter((x) => !used(x));
+    const st = out.some((o) => o.st === "err") ? "err" : out.some((o) => o.st === "wrong") ? "wrong" : out.some((o) => o.st === "def") ? "def" : "ok";
+    return { out, skipped, st };
+  }
+  // 旧代码读一条新记录，改票价，用旧模式写回；按标签号编码时可以把不认识的字段原样带上
+  function roundTrip(v1, v2, enc) {
+    const r = decode(enc, v1);
+    if (r.st === "err") return { st: "na", first: r };
+    const vals = {};
+    for (const o of r.out) vals[o.f.id] = o.f.id === "price" ? NEWPRICE : o.v;
+    const back = write(v1, vals);
+    if (mode() === "tag" && $("keep").checked) back.items.push(...r.skipped);
+    return { st: "done", first: r, back, final: decode(back, v2) };
+  }
+  const utf8 = (s) => new TextEncoder().encode(s).length;
+  const varint = (n) => (n < 128 ? 1 : n < 16384 ? 2 : 3);
+  function sizes(enc) {
+    let bin = 0;
+    for (const x of enc.items) {
+      if (mode() === "tag") bin += 1 + (x.type === "string" ? varint(utf8(x.v)) + utf8(x.v) : varint(x.v));
+      else bin += x.type === "string" ? varint(utf8(x.v) * 2) + utf8(x.v) : varint(x.v * 2);
+    }
+    const obj = {};
+    for (const x of enc.items) obj[x.name] = x.v;
+    return { bin, json: utf8(JSON.stringify(obj)) };
+  }
+  const VERDICT = { ok: "✓ 能读", def: "✓ 用了默认值", err: "✗ 报错", wrong: "✗ 读错了" };
+  function why(r) {
+    const bad = r.out.find((o) => o.st === "err") || r.out.find((o) => o.st === "wrong") || r.out.find((o) => o.st === "def");
+    if (!bad) return r.skipped.length ? `数据里多出来的 ${r.skipped.map((x) => (mode() === "tag" ? "标签 " + x.tag : x.name)).join("、")} 被跳过了。` : "每个字段都对上了。";
+    if (bad.st === "err") return `读者模式要 ${bad.f.name}，写者模式里没有，读者模式也没给默认值，解码失败。`;
+    if (bad.st === "wrong") return `${bad.f.name} 读到的其实是 ${bad.from} 的值：标签 ${bad.f.tag} 在两份模式里指的不是同一个字段。不报错，数据却错了。`;
+    return `${bad.f.name} 数据里没有，填了${mode() === "tag" ? "类型的默认值" : "读者模式里的默认值"}：${disp(bad.v)}。`;
+  }
+  function summary() {
+    const { v1, v2 } = schemas();
+    if (mode() === "tag" && dupTag(v2)) return "新模式里 seat 和 vip 都用标签 2，这样的模式根本编译不过。先删掉 seat，再让 vip 用它的旧标签。";
+    const back = decode(write(v1, OLD), v2), fwd = decode(write(v2, NEW), v1);
+    return `新代码读旧数据：${VERDICT[back.st]}。${why(back)} 旧代码读新数据：${VERDICT[fwd.st]}。${why(fwd)}`;
+  }
+  const NOTE = {
+    add: (on) => (on ? "新模式多了字段 vip。" : "撤掉了 vip。"),
+    drop: (on) => (on ? "新模式删掉了 seat。" : "seat 回来了。"),
+    rename: (on) => (on ? (mode() === "tag" ? "price 改名 amount：数据里只有标签号 3，名字不进数据。" : "price 改名 amount，新的读者模式里留了别名 price。") : "名字改回 price。"),
+    reuse: (on) => (on ? (mode() === "tag" ? (S.ch.add ? "vip 改用标签 2。" : "先加字段 vip，这一项才起作用。") : "按字段名对上的编码里没有标签号，这一项不起作用；换回按标签号再看。") : "vip 用回新标签 4。"),
+  };
+  function cellsOf(sc, other) {
+    return sc.map((f) => {
+      const changed = !other.some((g) => g.id === f.id && g.name === f.name && g.tag === f.tag && g.def === f.def);
+      let t = (mode() === "tag" ? `${f.tag}·` : "") + f.name;
+      if (f.alias && mode() === "name") t += `（别名 ${f.alias}）`;
+      if (mode() === "name") t += f.def !== undefined ? ` 默认 ${f.def}` : " 无默认";
+      return h("span", { class: `cell ${changed ? "on" : ""}` }, t);
+    });
+  }
+  function resultCells(r) {
+    const cs = r.out.map((o) => {
+      if (o.st === "ok") return h("span", { class: "cell ok" }, `${o.f.name}=${disp(o.v)}` + (o.via ? `（按别名 ${o.via}）` : ""));
+      if (o.st === "def") return h("span", { class: "cell on" }, `${o.f.name}=${disp(o.v)}（默认）`);
+      if (o.st === "wrong") return h("span", { class: "cell bad" }, `${o.f.name}=${disp(o.v)}？其实是 ${o.from}`);
+      return h("span", { class: "cell bad" }, `${o.f.name}：缺，没默认值`);
+    });
+    for (const x of r.skipped) cs.push(h("span", { class: "cell dim" }, mode() === "tag" ? `标签 ${x.tag}` : x.name));
+    return cs;
+  }
+  function lane(label, cells, status) {
+    return h("div", { class: "lane" }, h("span", { class: "lbl" }, label), ...cells, status ? h("span", { class: "pill" }, status) : null);
+  }
+  const grp = (t) => h("div", { class: "grp" }, t);
+  function render() {
+    for (const b of root.querySelectorAll("button[aria-pressed]")) b.setAttribute("aria-pressed", String(!!S.ch[b.dataset.a]));
+    const { v1, v2 } = schemas();
+    const st = $("stage"); st.textContent = "";
+    st.append(grp("两份模式（高亮的是改动过的字段）"));
+    st.append(lane("旧模式 v1", cellsOf(v1, v1)));
+    st.append(lane("新模式 v2", cellsOf(v2, v1)));
+    const stats = $("stats"); stats.textContent = "";
+    const stat = (v, l) => stats.append(h("div", { class: "stat" }, h("div", { class: "v" }, String(v)), h("div", { class: "l" }, l)));
+    if (mode() === "tag" && dupTag(v2)) {
+      st.append(lane("结果", [h("span", { class: "cell bad" }, "标签 2 用了两次")], "模式编译不过"));
+      stat("—", "新代码读旧数据（向后兼容）"); stat("—", "旧代码读新数据（向前兼容）"); stat("—", "写回之后，新字段 vip"); stat("—", "新记录编码后（二进制 / JSON）");
+      return;
+    }
+    const encOld = write(v1, OLD), encNew = write(v2, NEW);
+    const tagged = (enc) => enc.items.map((x) => h("span", { class: "cell" }, mode() === "tag" ? `${x.tag}:${x.v}` : String(x.v)));
+    st.append(grp("新旧代码各写了一条" + (mode() === "name" ? "（记录前面带着写者模式的版本号）" : "（数据里只有标签号和值）")));
+    st.append(lane("旧代码写的", tagged(encOld), mode() === "name" ? "v1" : ""));
+    st.append(lane("新代码写的", tagged(encNew), mode() === "name" ? "v2" : ""));
+    const back = decode(encOld, v2), fwd = decode(encNew, v1), rt = roundTrip(v1, v2, encNew);
+    st.append(grp("互相读一读（灰色划掉的是被跳过的）"));
+    st.append(lane("新代码读旧数据", resultCells(back), VERDICT[back.st]));
+    st.append(lane("旧代码读新数据", resultCells(fwd), VERDICT[fwd.st]));
+    st.append(grp(`旧代码读新数据，把票价改成 ${NEWPRICE}，用旧模式写回；新代码再读`));
+    let vipNote = "—";
+    if (rt.st === "na") st.append(lane("写回后新代码读", [h("span", { class: "cell bad" }, "旧代码读都读不了")], "没法写回"));
+    else {
+      st.append(lane("写回后新代码读", resultCells(rt.final), VERDICT[rt.final.st]));
+      const vip = rt.final.out.find((o) => o.f.id === "vip");
+      if (vip) vipNote = vip.st === "ok" ? "还在" : vip.st === "err" ? "读不了" : vip.st === "wrong" ? "读错了" : "丢了";
+    }
+    if (!S.ch.add) vipNote = "没加 vip";
+    const sz = sizes(encNew);
+    stat(VERDICT[back.st], "新代码读旧数据（向后兼容）");
+    stat(VERDICT[fwd.st], "旧代码读新数据（向前兼容）");
+    stat(vipNote, "写回之后，新字段 vip");
+    stat(`${sz.bin} / ${sz.json} 字节`, "新记录编码后（二进制 / JSON）");
+  }
+  const say = (t) => { $("say").textContent = t; };
+  root.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-a]"); if (!b) return;
+    const a = b.dataset.a;
+    if (a === "reset") { reset(); $("vipdef").checked = false; $("seatdef").checked = false; $("keep").checked = true; $("mode").value = "tag"; render(); say("回到起点：旧模式和新模式一模一样。先点「加字段 vip」。"); return; }
+    S.ch[a] = !S.ch[a];
+    render(); say(NOTE[a](S.ch[a]) + " " + summary());
+  });
+  $("mode").addEventListener("change", () => { render(); say((mode() === "tag" ? "换成按标签号：数据里只有标签号和值，字段缺了就是类型的默认值（空串、0），模式里不能自定默认值。" : "换成按字段名对上：数据里只有值，解码时拿着写者模式，按名字对到读者模式上。") + " " + summary()); });
+  $("vipdef").addEventListener("change", () => { render(); say((mode() === "tag" ? "按标签号编码时这个选项不起作用：proto3 的默认值固定是类型的零值。" : $("vipdef").checked ? "新模式里 vip 有了默认值「普通」。" : "vip 不再有默认值。") + " " + summary()); });
+  $("seatdef").addEventListener("change", () => { render(); say((mode() === "tag" ? "按标签号编码时这个选项不起作用：proto3 的默认值固定是类型的零值。" : $("seatdef").checked ? "旧模式里 seat 有了默认值「现场分配」，新模式也继承它。" : "seat 不再有默认值。") + " " + summary()); });
+  $("keep").addEventListener("change", () => { render(); say(mode() === "tag" ? ($("keep").checked ? "旧代码解码时把不认识的标签连同字节一起留着，写回时原样带上。" : "旧代码解码成一个只认识旧字段的对象，不认识的标签读完就扔了。看最后一行。") : "按字段名对上的编码按读者模式解码，多出来的字段直接跳过；旧代码再用旧模式写回，写出来的数据里根本放不下 vip。这个选项在这里不起作用。"); });
+  reset(); render();
+})();
+</script>
+</body>
+</html>

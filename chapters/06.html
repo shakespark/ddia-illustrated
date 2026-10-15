@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 6 章 · 复制 · DDIA 导读</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/chapters.js"></script>
+<script src="../assets/sections.js"></script>
+<script src="../assets/dd.js"></script>
+<style>
+#sim-06 .pill.bad { border-color: var(--bad); background: var(--bad-soft); }
+#sim-06 .pill.ok { border-color: var(--ok); background: var(--ok-soft); }
+#sim-06 .lane > .lbl { min-width: 9.5em; }
+#sim-06 .pill.on { border-color: var(--accent); background: var(--accent-soft); }
+</style>
+</head>
+<body data-chapter="6">
+<main>
+
+<h2>这一章在做什么</h2>
+<div class="gist"><p>复制就是在几台联网的机器上各放一份相同的数据。数据不变时这很容易，难全在改动上：一次写先落到一台机器，别的副本迟早跟上，没跟上的这段时间里读的人会看到什么，机器坏了又会丢掉什么。这一章讲三种做法：所有写只进一个主库（单主），几个主库都能写（多主），读写都同时发给好几个副本（无主）。取舍落在一条线上：越不依赖单个节点，越扛得住故障和断网，代价是要你来解决冲突，一致性也更弱。</p></div>
+<figure class="fig"><img src="../assets/img/06-tape-library.jpg" alt="一台打开了门的磁带库内部：左边的架子上竖着一排排蓝色标签的磁带盒，中间是几个空着的槽位" loading="lazy">
+<figcaption>一台小型磁带库（ADIC Scalar 100）打开门后的内部，左边架上是 LTO-2 磁带盒；这台库里还留着再装四台磁带机的空位（本站裁剪）。开篇的方框先把一件事说清楚：复制替代不了备份。误删一行，删除会被原样复制到每一个副本上；想回到过去，只能靠存在别处的旧快照。<span class="src">Aaron Kuhn，CC BY-SA 2.0，维基共享资源</span></figcaption></figure>
+
+<h2>读之前：先预测</h2>
+<p>第 4 章讲一台机器上的存储引擎，这一章开始把数据放到好几台机器上，每个副本里跑的仍是那些引擎，主库甚至可以直接把预写日志发给从库。后面几章都从这里接着走：第 7 章去掉「每台机器都装得下全部数据」这个假设，讲分片；第 9 章细说这一章反复碰到的不可靠的网络和时钟；第 10 章的共识，正是自动选出新主库要解决的问题；第 12 章的变更数据捕获，用的就是这里的逻辑日志。</p>
+
+<div class="bet" data-key="06-a">
+  <div class="q">你在网盘的共享文件夹里上传了一个文件，主库马上回复成功。之后每秒刷新一次文件夹，读请求在两个从库之间轮流：从库 A 几乎不落后，从库 B 落后 4 秒。接下来几秒里你会看到什么？</div>
+  <div class="opts">
+    <button>一直看得到：主库已经说成功了，说明所有副本都写好了</button>
+    <button>前 4 秒都看不到，之后一直看得到</button>
+    <button>时有时无：轮到 A 时看得到，轮到 B 又没了，几秒后才稳定</button>
+    <button>看得到，因为浏览器记住了自己刚上传的文件</button>
+  </div>
+  <textarea class="note" data-key="06-a-bet" placeholder="你为什么这么猜？一两句就行"></textarea>
+</div>
+
+<div class="bet" data-key="06-b">
+  <div class="q">一个两地部署的仓储系统，两个区域各有一个主库，异步互相同步，冲突用「最后写入者胜」解决。两个区域的管理员几乎同时修改同一件商品的货架位置（两次修改相隔约 0.2 秒，彼此还没同步过来），两边都收到了「保存成功」。最后会怎样？</div>
+  <div class="opts">
+    <button>两个修改都留下，下次读的时候返回两个值让应用去挑</button>
+    <button>真正后保存的那一次一定胜出，先保存的被覆盖</button>
+    <button>同步时发现冲突，后到的那次被回滚，管理员会收到报错</button>
+    <button>时间戳大的那次留下，另一次悄悄丢掉，而时间戳大的不一定是真正后保存的</button>
+    <button>两个区域各留各的值，从此永远不一致</button>
+  </div>
+  <textarea class="note" data-key="06-b-bet" placeholder="你为什么这么猜？"></textarea>
+</div>
+
+<div class="crux"><p>写总要先落到某一台机器上，别的副本总要慢一步。这一步的空档里，读的人会看到什么、机器坏了会丢掉什么？三种复制方式把「谁能收写」放在不同的地方，各自付出的代价是什么？</p></div>
+<ol class="qs">
+  <li>异步复制的主库坏了，换一个从库当主库，已经告诉用户「成功」的写为什么可能就此消失？<span class="sec">§1.1</span><span class="sec">§1.3</span></li>
+  <li>复制延迟会造成哪三种怪象？每一种要靠哪一种保证挡住？<span class="sec">§1.5</span></li>
+  <li>两个主库同时改了同一条记录，有哪几种收场的办法，各自丢掉了什么？<span class="sec">§2.3</span></li>
+  <li>无主复制里 w + r &gt; n 为什么通常能读到最新值，又在哪些情况下不灵？<span class="sec">§3.1</span></li>
+</ol>
+
+<h2>这一章的骨架</h2>
+<p>这一章按「谁能收写」分成三大块：单主（§1）、多主（§2）、无主（§3），后两块都比第一块短，因为很多问题前面已经铺好了。容易乱的是两处：§1 里同步与异步、故障切换、日志格式、复制延迟一路排下来，前四节都是在为 §1.5 做铺垫；§2.3 的冲突解决和 §3.4 的并发检测是同一个问题的两半，隔着一大块无主复制，读到 §3.4 时要回头把它们接上。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 400" role="img" aria-label="这一章的骨架：复制分为单主、多主、无主三块，各自下面列出几个问题和节号，最下面是两类代价">
+  <rect class="box" x="150" y="8" width="340" height="36" rx="8"/>
+  <text class="t-b" x="320" y="31" text-anchor="middle">复制：同一份数据放在几台机器上，难在改动</text>
+  <path class="ln" d="M320 44 V60 M110 60 H530 M110 60 V78 M320 60 V78 M530 60 V78"/>
+  <rect class="b-a" x="10" y="78" width="200" height="34" rx="6"/>
+  <text class="t-b" x="110" y="100" text-anchor="middle">单主 §1</text>
+  <rect class="b-a" x="220" y="78" width="200" height="34" rx="6"/>
+  <text class="t-b" x="320" y="100" text-anchor="middle">多主 §2</text>
+  <rect class="b-a" x="430" y="78" width="200" height="34" rx="6"/>
+  <text class="t-b" x="530" y="100" text-anchor="middle">无主 §3</text>
+  <text class="t-m" x="110" y="130" text-anchor="middle">所有写只进一个主库</text>
+  <text class="t-m" x="320" y="130" text-anchor="middle">几个主库都能收写</text>
+  <text class="t-m" x="530" y="130" text-anchor="middle">直接写好几个副本</text>
+  <rect class="box" x="10" y="140" width="200" height="34" rx="6"/>
+  <text x="110" y="162" text-anchor="middle">同步还是异步 §1.1</text>
+  <rect class="box" x="10" y="182" width="200" height="34" rx="6"/>
+  <text x="110" y="204" text-anchor="middle">加从库、故障切换 §1.2–1.3</text>
+  <rect class="box" x="10" y="224" width="200" height="34" rx="6"/>
+  <text x="110" y="246" text-anchor="middle">复制日志的格式 §1.4</text>
+  <rect class="b-warn" x="10" y="266" width="200" height="34" rx="6"/>
+  <text x="110" y="288" text-anchor="middle">复制延迟的三种怪象 §1.5</text>
+  <rect class="box" x="220" y="140" width="200" height="34" rx="6"/>
+  <text x="320" y="162" text-anchor="middle">跨区域、复制拓扑 §2.1</text>
+  <rect class="box" x="220" y="182" width="200" height="34" rx="6"/>
+  <text x="320" y="204" text-anchor="middle">离线与协作：同步引擎 §2.2</text>
+  <rect class="b-warn" x="220" y="224" width="200" height="34" rx="6"/>
+  <text x="320" y="246" text-anchor="middle">写冲突怎么收场 §2.3</text>
+  <rect class="box" x="430" y="140" width="200" height="34" rx="6"/>
+  <text x="530" y="162" text-anchor="middle">法定人数 w + r &gt; n §3.1</text>
+  <rect class="box" x="430" y="182" width="200" height="34" rx="6"/>
+  <text x="530" y="204" text-anchor="middle">和单主比性能 §3.2–3.3</text>
+  <rect class="b-warn" x="430" y="224" width="200" height="34" rx="6"/>
+  <text x="530" y="246" text-anchor="middle">判断并发：版本向量 §3.4</text>
+  <path class="ln-d" d="M420 241 H430"/>
+  <text class="t-m" x="425" y="280" text-anchor="middle">同一个问题的两半</text>
+  <rect class="b-bad" x="10" y="318" width="200" height="50" rx="6"/>
+  <text x="110" y="338" text-anchor="middle">代价：主库是瓶颈</text>
+  <text x="110" y="358" text-anchor="middle">从库会读到旧数据</text>
+  <rect class="b-bad" x="220" y="318" width="410" height="50" rx="6"/>
+  <text x="425" y="338" text-anchor="middle">好处：更扛节点故障、断网和延迟尖刺</text>
+  <text x="425" y="358" text-anchor="middle">代价：要解决写冲突，一致性更弱</text>
+  <text class="t-m" x="10" y="392">黄色三格是全章的重心，读到时放慢</text>
+</svg>
+<figcaption>本站画的全章结构。§1.6 只是 §1.5 的收尾，§4 是小结，图里没有单列。</figcaption>
+</figure>
+<p class="lede">边读边填：每行一个问题，读到答案就写一两句。只存在你这台设备的浏览器里，别人看不到。</p>
+<div class="table-wrap"><table class="findit">
+  <tr><th>要找的</th><th>带着这个问题读，找到了就写下来</th></tr>
+  <tr><td>半同步</td><td><p class="q">「半同步」到底同步了几个从库？为什么不把所有从库都设成同步？<span class="sec">§1.1</span></p><input class="note" data-key="06-f1" aria-label="半同步：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>故障切换</td><td><p class="q">自动故障切换分哪三步？至少找出三处会出事的地方。<span class="sec">§1.3</span></p><input class="note" data-key="06-f2" aria-label="故障切换：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>日志格式</td><td><p class="q">三种复制日志各卡在哪里？哪一种允许主从跑不同版本的数据库？<span class="sec">§1.4</span></p><input class="note" data-key="06-f3" aria-label="日志格式：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>读己之写</td><td><p class="q">书里给了哪几种实现办法？用户换着设备用时又多出哪两个麻烦？<span class="sec">§1.5</span></p><input class="note" data-key="06-f4" aria-label="读己之写：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>最后写入者胜</td><td><p class="q">这个名字为什么会误导人？什么情况下用它没问题？<span class="sec">§2.3</span></p><input class="note" data-key="06-f5" aria-label="最后写入者胜：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>法定人数的边界</td><td><p class="q">w + r &gt; n 也可能读到旧值，书里列了哪几种情形？<span class="sec">§3.1</span></p><input class="note" data-key="06-f6" aria-label="法定人数的边界：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>版本向量</td><td><p class="q">只有一个副本时一个版本号就够，为什么多个副本时不够？<span class="sec">§3.4</span></p><input class="note" data-key="06-f7" aria-label="版本向量：你的答案" placeholder="你的答案"></td></tr>
+</table></div>
+<details class="reveal"><summary>读完了？对照我找到的</summary><ul>
+  <li>半同步：一个从库同步、其余异步，它慢了就换一个异步的顶上；全部同步的话，任何一个节点出事，写就全停。</li>
+  <li>故障切换：判定主库死亡、选新主库、让大家改认新主库；会出事的有：异步时丢写、旧主库回来还当自己是主、脑裂、超时设得不对。</li>
+  <li>日志格式：语句会遇到不确定的函数和执行顺序；预写日志太底层，和存储格式绑死；逻辑日志与引擎解耦，能跨版本。</li>
+  <li>读己之写：可能改过的从主库读；按最近一次写的时刻决定读主库；记住自己写的位置，只读追上了的副本。多设备时位置要集中保存，各设备还可能被路由到不同区域。</li>
+  <li>最后写入者胜：并发写没有先后，所谓「最后」其实是随机挑一个，其余悄悄丢掉；只插入、键不重复、从不更新时没问题。</li>
+  <li>法定人数的边界：新值的节点坏了、从旧副本恢复；再平衡途中；读和写并发；写在部分节点成功但总数不足 w；时钟不准；并发写。</li>
+  <li>版本向量：多个副本同时各自收写，一个计数器分不清谁见过谁，要每个副本一个版本号。</li>
+</ul></details>
+
+<h2>分节地图</h2>
+<p class="lede">全章约 1.8 万词（不算图注），建议分五次读。第二次的 §1.5 和第三次的 §2.3 是全章的重心；第四、五次讲无主复制，§3.4 的版本号例子要拿笔跟着算一遍。</p>
+<ol class="secmap">
+  <li class="sit">第一次坐下<span>§0–§1.3 · 约 3700 词 · 单主复制怎么搭起来，节点坏了怎么办</span></li>
+  <li data-sec="0"><b>Replication means keeping a copy…<span class="w">约 600 词</span></b><span class="cn">开篇</span><span class="what">复制的三个理由，三种做法的总览。方框讲复制和备份为什么不能互相替代。</span></li>
+  <li data-sec="1"><b>Single-Leader Replication<span class="w">约 400 词</span></b><span class="cn">单主复制</span><span class="what">主库收所有写，从库按同样顺序重放复制日志。哪些系统是这么做的。</span></li>
+  <li data-sec="1.1"><b>Synchronous Versus Asynchronous Replication<span class="w">约 600 词</span></b><span class="cn">同步复制与异步复制</span><span class="what">主库等不等从库确认：各自换来什么、丢掉什么，半同步怎么折中。</span></li>
+  <li data-sec="1.2"><b>Setting Up New Followers<span class="w">约 900 词</span></b><span class="cn">添加新的从库</span><span class="what">不停机加从库靠快照加日志位置。方框讲把数据库放在对象存储上的利弊。</span></li>
+  <li data-sec="1.3"><b>Handling Node Outages<span class="w">约 1300 词</span></b><span class="cn">处理节点宕机</span><span class="what">从库挂了怎么追上；主库挂了的故障切换分三步，留意每一步能出的事。</span></li>
+  <li class="sit">第二次坐下<span>§1.4–§1.6 · 约 3300 词 · 复制日志的格式，复制延迟的三种怪象</span></li>
+  <li data-sec="1.4"><b>Implementation of Replication Logs<span class="w">约 1000 词</span></b><span class="cn">复制日志的实现</span><span class="what">语句、预写日志、逻辑日志三种格式，看它们和存储引擎绑得多紧。</span></li>
+  <li data-sec="1.5"><b>Problems with Replication Lag<span class="w">约 2000 词</span></b><span class="cn">复制延迟带来的问题</span><span class="what">读扩展只能配异步复制，于是有了三种怪象和对应的三种保证。最该细读的一节。</span></li>
+  <li data-sec="1.6"><b>Solutions for Replication Lag<span class="w">约 300 词</span></b><span class="cn">复制延迟的解决办法</span><span class="what">在应用里补，还是换一个强一致的数据库？NoSQL 和 NewSQL 的来回。</span></li>
+  <li class="sit">第三次坐下<span>§2–§2.3 · 约 5100 词 · 多主复制和写冲突</span></li>
+  <li data-sec="2"><b>Multi-Leader Replication<span class="w">约 300 词</span></b><span class="cn">多主复制</span><span class="what">让不止一个节点收写。同步的多主等于单主，所以只讨论异步的。</span></li>
+  <li data-sec="2.1"><b>Geographically Distributed Operation<span class="w">约 1200 词</span></b><span class="cn">跨地域运行</span><span class="what">每个区域一个主库，从四个方面和单主对比；再看几种复制拓扑各自的毛病。</span></li>
+  <li data-sec="2.2"><b>Sync Engines and Local-First Software<span class="w">约 1100 词</span></b><span class="cn">同步引擎与本地优先软件</span><span class="what">离线可用和实时协作的应用，本质上都是多主复制。同步引擎的好处和适用范围。</span></li>
+  <li data-sec="2.3"><b>Dealing with Conflicting Writes<span class="w">约 2500 词</span></b><span class="cn">处理写冲突</span><span class="what">避免冲突、最后写入者胜、手动解决、自动合并。注意每种办法丢掉的是什么。</span></li>
+  <li class="sit">第四次坐下<span>§3–§3.2 · 约 3000 词 · 无主复制和法定人数</span></li>
+  <li data-sec="3"><b>Leaderless Replication<span class="w">约 300 词</span></b><span class="cn">无主复制</span><span class="what">不要主库，任何副本都能直接收写。Dynamo 风格这个叫法的来历。</span></li>
+  <li data-sec="3.1"><b>Writing to the Database When a Node Is Down<span class="w">约 2000 词</span></b><span class="cn">有节点宕机时怎么写</span><span class="what">读写都发给多个副本：漏掉的写怎么补，w + r &gt; n 保证什么、不保证什么。</span></li>
+  <li data-sec="3.2"><b>Single-Leader Versus Leaderless Replication Performance<span class="w">约 700 词</span></b><span class="cn">单主与无主的性能对比</span><span class="what">无主为什么更扛慢节点和灰色故障，它自己又有哪些性能问题。</span></li>
+  <li class="sit">第五次坐下<span>§3.3–§4 · 约 2800 词 · 跨区域、检测并发写，加小结</span></li>
+  <li data-sec="3.3"><b>Multi-Region Operation<span class="w">约 200 词</span></b><span class="cn">跨区域运行</span><span class="what">无主数据库跨区域时怎么转发写、怎么选一致性级别。</span></li>
+  <li data-sec="3.4"><b>Detecting Concurrent Writes<span class="w">约 1900 词</span></b><span class="cn">检测并发写</span><span class="what">什么叫「并发」；用版本号分出覆盖和并发，推广到多副本就是版本向量。</span></li>
+  <li data-sec="4"><b>Summary<span class="w">约 600 词</span></b><span class="cn">小结</span><span class="what">全章回顾。先自己回忆一遍再读它。</span></li>
+</ol>
+
+<h2>先用中文过一遍</h2>
+<h3>单主复制：写只进主库，从库照着日志重放</h3>
+<p>选一个副本当主库，客户端的写都发给它。主库每改一次数据，就把改动记进复制日志发给各个从库，从库按同样的顺序重放一遍；读可以落到任何一个副本上。好比一个班只有一个人记账，其他人照着这份流水抄。</p>
+<p>关键的选择是同步还是异步。主库等某个从库确认收到了，才告诉客户端「成功」，这是同步：这个从库一定和主库一样新，可它一卡住，所有写都得停下等它。不等就是异步：写永远不会被从库拖慢，代价是主库如果在改动发出去之前坏掉，客户端已经收到「成功」的写就没了。实际系统常常折中，一个从库同步，其余异步。</p>
+<p>主库坏了要故障切换（failover）：先判断它真的死了（通常靠超时），再选一个数据最新的从库接任，最后让客户端和其他从库都改认新主库。每一步都可能出事：超时设长了，恢复得慢；设短了，负载一高就误判。旧主库回来以后如果还以为自己是主库，两个主库同时收写，就是脑裂（split brain）。</p>
+
+<h3>复制延迟：刚写完读不到，刷新又倒回去</h3>
+<p>大多数线上服务读多写少，于是有一种很诱人的做法：多加几个从库分摊读请求，叫读扩展。从库一多，就只能用异步复制，否则任何一个从库出问题，写就全停了。异步就有延迟：平时不到一秒，系统负载高或者网络出问题时，可能是几秒甚至几分钟。只要停止写入、等一会儿，从库终究会追上，这就是最终一致性（eventual consistency）；「终究」是多久，没有上限。</p>
+<p>延迟大了，用户会碰到三种怪象。自己刚改的东西刷新后不见了，要的保证叫读己之写（read-after-write）；刷新一次，看到的比上一次还旧，像时间倒流，要的保证叫单调读（monotonic reads）；有先后关系的两次写，读的人看到的顺序反了，比如先看到回复、后看到提问，要的保证叫一致前缀读（consistent prefix reads）。前两种在下面的模拟器里能直接看到。办法本身不复杂，难在应用代码里处处都得想着它。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 310" role="img" aria-label="复制延迟的时间线：用户给文件改名，写进主库；改动很快到了从库 A，却过了好几秒才到从库 B。用户刷新三次，第一次落到 B 读到旧名字，第二次落到 A 读到新名字，第三次又落到 B 读到旧名字">
+  <defs><marker id="a6a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="54">主库</text>
+  <text class="t-b" x="10" y="114">从库 B</text>
+  <text class="t-m" x="10" y="130">落后好几秒</text>
+  <text class="t-b" x="10" y="174">从库 A</text>
+  <text class="t-m" x="10" y="190">几乎不落后</text>
+  <text class="t-b" x="10" y="244">用户</text>
+  <path class="ln-d" d="M110 50 H630 M110 110 H630 M110 170 H630 M110 240 H630"/>
+  <text class="t-m" x="626" y="232" text-anchor="end">时间 →</text>
+  <path class="ln-a" d="M130 240 L150 52" marker-end="url(#a6a)"/>
+  <circle class="f-a" cx="150" cy="50" r="5"/>
+  <path class="ln" d="M152 54 L188 166" marker-end="url(#a6a)"/>
+  <path class="ln-d" d="M156 52 L556 108" marker-end="url(#a6a)"/>
+  <text class="t-m" x="200" y="40">发给 B 的改动，路上走了好几秒</text>
+  <circle class="f-a" cx="560" cy="110" r="5"/>
+  <text class="t-m" x="566" y="128">B 这时才改名</text>
+  <path class="ln" d="M240 240 L255 114" marker-end="url(#a6a)"/>
+  <path class="ln-bad" d="M270 114 L285 236" marker-end="url(#a6a)"/>
+  <path class="ln" d="M340 240 L355 174" marker-end="url(#a6a)"/>
+  <path class="ln-ok" d="M370 174 L385 236" marker-end="url(#a6a)"/>
+  <path class="ln" d="M440 240 L455 114" marker-end="url(#a6a)"/>
+  <path class="ln-bad" d="M470 114 L485 236" marker-end="url(#a6a)"/>
+  <text x="262" y="262" text-anchor="middle">① 读到「草稿」</text>
+  <text x="362" y="262" text-anchor="middle">读到「终稿」</text>
+  <text x="462" y="262" text-anchor="middle">② 又是「草稿」</text>
+  <text class="t-a" x="110" y="282">改名：草稿 → 终稿</text>
+  <text class="t-bad" x="10" y="302">① 自己刚改的读不到：违反读己之写　② 比上一次读到的还旧：违反单调读</text>
+</svg>
+<figcaption>本站画的示意图，用的是网盘里给文件改名的例子。三次刷新都是读，只是被分到了落后程度不同的从库上；主库上的数据从头到尾都是对的。</figcaption>
+</figure>
+
+<h3>多主：每个区域都能写，代价是冲突</h3>
+<p>单主的毛病是所有写都得经过那一个主库。数据库部署在好几个区域（几个地理上分开的数据中心）时，离主库远的用户每次写都要跨洋走一趟；连不上主库，就根本写不了。多主让每个区域都有自己的主库，写在本地完成，再异步同步给其他区域。手机上离线可用的应用、几个人同时编辑一份文档，其实也是多主：每台设备、每个浏览器标签页都是一个能收写的副本，只是网络差到了极点。</p>
+<p>代价是冲突。两个主库同时改了同一条记录，各自都说「成功」，同步时才发现对不上。收场的办法大致有四种：从源头上避免（同一条记录只让一个主库写）；比时间戳，留大的，丢掉另一个（最后写入者胜，LWW）；把几个值都留下，交给应用或用户去挑；按数据类型自动合并，文本、列表、计数器都有专门的算法（CRDT 和 OT）。还有一类冲突更隐蔽：两次写各自没问题，合在一起才违反约束，比如演出的同一个座位被两个区域各卖出去一次。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 270" role="img" aria-label="多主复制的写冲突：甲、乙两个区域的管理员同时修改同一件商品的货架位置，一个改成 B-07，一个改成 C-03，异步同步时发现冲突；下面是三种收场办法">
+  <defs><marker id="a6b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-m" x="120" y="16" text-anchor="middle">甲区域管理员：改成 B-07</text>
+  <text class="t-m" x="520" y="16" text-anchor="middle">乙区域管理员：改成 C-03</text>
+  <rect class="b-a" x="20" y="26" width="200" height="50" rx="6"/>
+  <text class="t-b" x="120" y="46" text-anchor="middle">区域甲的主库</text>
+  <text class="t-mono" x="120" y="66" text-anchor="middle">货架 A-12 → B-07 ✓</text>
+  <rect class="b-a" x="420" y="26" width="200" height="50" rx="6"/>
+  <text class="t-b" x="520" y="46" text-anchor="middle">区域乙的主库</text>
+  <text class="t-mono" x="520" y="66" text-anchor="middle">货架 A-12 → C-03 ✓</text>
+  <path class="ln" d="M222 40 L416 62" marker-end="url(#a6b)"/>
+  <path class="ln" d="M418 40 L224 62" marker-end="url(#a6b)"/>
+  <text class="t-m" x="320" y="30" text-anchor="middle">异步同步</text>
+  <path class="ln-d" d="M320 52 V92"/>
+  <rect class="b-bad" x="230" y="92" width="180" height="30" rx="6"/>
+  <text x="320" y="112" text-anchor="middle">冲突：同一格两个新值</text>
+  <path class="ln" d="M320 122 V136 M110 136 H530 M110 136 V150 M320 136 V150 M530 136 V150"/>
+  <rect class="b-ok" x="10" y="150" width="200" height="56" rx="6"/>
+  <text x="110" y="173" text-anchor="middle">避免：这件商品只让</text>
+  <text x="110" y="194" text-anchor="middle">一个区域的主库写</text>
+  <rect class="b-warn" x="220" y="150" width="200" height="56" rx="6"/>
+  <text x="320" y="173" text-anchor="middle">LWW：留时间戳大的</text>
+  <text x="320" y="194" text-anchor="middle">另一个悄悄丢掉</text>
+  <rect class="box" x="430" y="150" width="200" height="56" rx="6"/>
+  <text x="530" y="173" text-anchor="middle">两个都留：读到</text>
+  <text class="t-mono" x="530" y="194" text-anchor="middle">{B-07, C-03}</text>
+  <text class="t-m" x="110" y="226" text-anchor="middle">改「归属」时会失效</text>
+  <text class="t-m" x="320" y="226" text-anchor="middle">两边的确认里有一个是假的</text>
+  <text class="t-m" x="530" y="226" text-anchor="middle">由应用或人来挑</text>
+  <text class="t-m" x="10" y="258">文本、列表、计数器这类数据，还可以用 CRDT 或 OT 自动合并，谁的改动都不丢（§2.3）</text>
+</svg>
+<figcaption>本站画的示意图，货架编号是编的。两个管理员都收到了「保存成功」，冲突是在之后的异步同步里才发现的，这时已经没法再拒绝谁了。</figcaption>
+</figure>
+
+<h3>无主：同时写好几个，同时读好几个</h3>
+<p>无主复制干脆不要主库：客户端（或替它跑腿的协调节点）把写同时发给 n 个副本，等到 w 个确认就算成功；读也同时问 n 个，等 r 个回复，取版本号最大的那个值。只要 w + r &gt; n，写过的那几个副本和读到的那几个副本至少有一个重叠，读就能拿到最新值。有副本宕机也不用故障切换，只要活着的还凑得够 w 和 r。</p>
+<p>宕机期间漏掉的写怎么补？读的时候发现某个副本的值旧了，顺手把新值写回去（读修复）；别的副本先替它收着，等它回来再转交（提示移交）；后台进程定期比对副本之间的差异（反熵）。书里接着列了一串「凑够了法定人数也可能读到旧值」的情形，这一段别跳过。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 272" role="img" aria-label="法定人数读写：五个副本，写入时副本 5 宕机，新值写进副本 1 到 4；读时问到副本 4 和 5，两个集合在副本 4 重叠，读到新旧两个版本，取版本大的，再把新值写回副本 5">
+  <defs><marker id="a6c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="20">n = 5，w = 4，r = 2：4 + 2 &gt; 5，所以写和读至少重叠一个副本</text>
+  <text class="t-a" x="258" y="50" text-anchor="middle">写 v8：等到 4 个确认就算成功（副本 5 当时宕机，没收到）</text>
+  <path class="ln-a" d="M20 70 V60 H496 V70"/>
+  <rect class="box" x="20" y="78" width="104" height="54" rx="6"/>
+  <text x="72" y="100" text-anchor="middle">副本 1</text>
+  <text class="t-mono" x="72" y="120" text-anchor="middle">v8</text>
+  <rect class="box" x="144" y="78" width="104" height="54" rx="6"/>
+  <text x="196" y="100" text-anchor="middle">副本 2</text>
+  <text class="t-mono" x="196" y="120" text-anchor="middle">v8</text>
+  <rect class="box" x="268" y="78" width="104" height="54" rx="6"/>
+  <text x="320" y="100" text-anchor="middle">副本 3</text>
+  <text class="t-mono" x="320" y="120" text-anchor="middle">v8</text>
+  <rect class="b-ok" x="392" y="78" width="104" height="54" rx="6"/>
+  <text x="444" y="100" text-anchor="middle">副本 4</text>
+  <text class="t-mono" x="444" y="120" text-anchor="middle">v8</text>
+  <rect class="b-bad" x="516" y="78" width="104" height="54" rx="6"/>
+  <text x="568" y="100" text-anchor="middle">副本 5</text>
+  <text class="t-mono" x="568" y="120" text-anchor="middle">v7（旧）</text>
+  <path class="ln-d" d="M476 134 C496 156 540 156 558 137" marker-end="url(#a6c)"/>
+  <text class="t-m" x="517" y="170" text-anchor="middle">读修复</text>
+  <path class="ln-a" d="M392 180 V190 H620 V180"/>
+  <text class="t-a" x="506" y="210" text-anchor="middle">读：等到 2 个回复</text>
+  <text x="10" y="236">副本 4 在两个集合里都有：读到 v8 和 v7，取版本大的 v8</text>
+  <text x="10" y="260">读修复：发现副本 5 是旧的，顺手把 v8 写回去</text>
+</svg>
+<figcaption>本站画的示意图，参数是随便取的（书里的例子用 n = 3 和 n = 5，读写人数相等）。w 大、r 小适合读多写少，代价是只要有两个副本连不上，写就会失败。</figcaption>
+</figure>
+
+<h3>这一章点名的系统</h3>
+<div class="sys">
+  <div><b>DRBD</b><span class="k">复制的块设备</span> 书里列举的单主复制的用户之一，复制的是磁盘块而不是数据库。</div>
+  <div><b>WAL-G、Litestream</b><span class="k">备份工具</span> 把复制日志和定期快照存进对象存储，既能做备份，也能拿来搭新从库。前者支持 PostgreSQL、MySQL、SQL Server，后者针对 SQLite。</div>
+  <div><b>VoltDB</b><span class="k">数据库</span> 用基于语句的复制，靠要求事务必须是确定性的来保证安全。</div>
+  <div><b>Lotus Notes</b><span class="k">协作软件</span> 书里说它在 1980 年代开了同步引擎的先河，只是那时还没有这个叫法。</div>
+  <div><b>Automerge、Yjs</b><span class="k">同步引擎</span> 开源后端、基于 CRDT，适合做本地优先软件。</div>
+  <div><b>ShareDB</b><span class="k">同步引擎</span> 用 OT 同步 JSON 数据。</div>
+  <div><b>CouchDB</b><span class="k">文档数据库</span> 冲突时把几个值都留下（兄弟值），交给应用去解决。</div>
+  <div><b>Riak</b><span class="k">无主数据库</span> Dynamo 风格，用 CRDT 解决冲突；2.0 版用点版本向量判断并发。</div>
+  <div><b>Cassandra、ScyllaDB</b><span class="k">无主数据库</span> Dynamo 风格，用时钟时间戳做最后写入者胜；跨区域的写先交给本区域的协调节点转发。</div>
+  <div><b>Dynamo 与 DynamoDB</b><span class="k">名字像，架构不同</span> Dynamo 是亚马逊的内部系统，只发表过论文；DynamoDB 是后来的云数据库，用的是基于 Multi-Paxos 的单主复制。</div>
+</div>
+
+<div class="table-wrap"><table class="terms">
+  <tr><th>英文</th><th>中文</th><th>一句话</th></tr>
+  <tr><td>leader / follower</td><td>主库 / 从库</td><td>主库收所有写，从库按主库的顺序重放；也叫 primary / replica 等（§1）。</td></tr>
+  <tr><td>replication log</td><td>复制日志</td><td>主库发给从库的改动流，从库靠它追平（§1）。</td></tr>
+  <tr><td>synchronous / asynchronous replication</td><td>同步 / 异步复制</td><td>主库等不等从库确认再报成功；一个同步、其余异步叫半同步（§1.1）。</td></tr>
+  <tr><td>failover</td><td><a class="term" href="../glossary.html#g-failover">故障切换</a></td><td>主库坏了，把一个从库提升为新主库，并让所有人改认它（§1.3）。</td></tr>
+  <tr><td>split brain</td><td><a class="term" href="../glossary.html#g-split-brain">脑裂</a></td><td>两个节点都以为自己是主库，同时收写（§1.3）。</td></tr>
+  <tr><td>logical (row-based) log</td><td>逻辑日志（按行）</td><td>按行记录增删改，和存储引擎的内部格式解耦（§1.4）。</td></tr>
+  <tr><td>replication lag</td><td><a class="term" href="../glossary.html#g-replication-lag">复制延迟</a></td><td>一次写在主库生效到在从库上可见之间的时间差（§1.5）。</td></tr>
+  <tr><td>eventual consistency</td><td><a class="term" href="../glossary.html#g-eventual-consistency">最终一致性</a></td><td>停止写入、等足够久，各副本终究会一致；多久没有上限（§1.5）。</td></tr>
+  <tr><td>read-after-write consistency</td><td><a class="term" href="../glossary.html#g-read-your-writes">读己之写一致性</a></td><td>用户总能读到自己提交过的改动；对别人的改动不作承诺（§1.5）。</td></tr>
+  <tr><td>monotonic reads</td><td><a class="term" href="../glossary.html#g-monotonic-reads">单调读</a></td><td>同一个用户连续读，不会先读到新数据、再读到更旧的（§1.5）。</td></tr>
+  <tr><td>consistent prefix reads</td><td>一致前缀读</td><td>有先后的几次写，任何人读到的顺序都和写的顺序一样（§1.5）。</td></tr>
+  <tr><td>last write wins (LWW)</td><td><a class="term" href="../glossary.html#g-lww">最后写入者胜</a></td><td>冲突时留时间戳最大的值，其余丢掉（§2.3）。</td></tr>
+  <tr><td>CRDT</td><td><a class="term" href="../glossary.html#g-crdt">无冲突复制数据类型</a></td><td>能把并发修改自动合并、让各副本收敛到同一状态的数据结构（§2.3）。</td></tr>
+  <tr><td>quorum</td><td><a class="term" href="../glossary.html#g-quorum">法定人数</a></td><td>读写各要多少个副本回应才算数；w + r &gt; n 时读写集合重叠（§3.1）。</td></tr>
+  <tr><td>version vector</td><td><a class="term" href="../glossary.html#g-version-vector">版本向量</a></td><td>每个副本一个版本号，合起来判断两次写是先后还是并发（§3.4）。</td></tr>
+</table></div>
+
+<h2>动手：模拟器</h2>
+<p>先猜：从库 B 落后 4 秒，读请求在 B 和 A 之间轮流（先 B 后 A）。你上传一个文件，接着连刷新 4 次，有几次看不到它？哪一次会比上一次看到的还少？勾上「读己之写」以后，同事上传的文件还会不会忽隐忽现？猜好了再动手。</p>
+<div class="sim" id="sim-06">
+  <div class="sim-head"><span class="tag">模拟器</span><h3>复制延迟：读到旧数据</h3><p class="desc">一个共享文件夹：一个主库，两个从库。上传写进主库，刷新从从库读。每个操作算 1 秒。先点「我上传一个文件」，再连点几次「刷新文件夹」。</p></div>
+  <div class="sim-body">
+    <div class="controls">
+      <button data-a="mine">我上传一个文件</button>
+      <button data-a="other">同事上传一个文件</button>
+      <button data-a="read">刷新文件夹</button>
+      <button data-a="wait">等 3 秒</button>
+      <button data-a="reset">重置</button>
+      <span class="sep"></span>
+      <label>从库 B 的延迟 <input data-r="lag" type="range" min="0" max="8" value="4"><span data-r="lagv">4</span> 秒</label>
+      <label><input data-r="ryw" type="checkbox"> 读己之写</label>
+      <label><input data-r="mono" type="checkbox"> 单调读</label>
+    </div>
+    <div class="stage" data-r="stage"></div>
+    <div class="narrate" data-r="say">从「我上传一个文件」开始。从库 A 几乎不落后，从库 B 落后的秒数用滑杆调。</div>
+    <div class="stats" data-r="stats"></div>
+  </div>
+</div>
+<ol class="qs">
+  <li>默认设置下，上传一个文件，连刷新 4 次。哪几次看不到自己的文件？哪一次「时间倒流」？把 B 的延迟调到 1 秒，重置后再做一遍。</li>
+  <li>重置，勾上「读己之写」，重做第一步：「改读主库」记了几次？再点「同事上传一个文件」，连刷新 3 次，同事的文件为什么还会忽隐忽现？</li>
+  <li>重置，只勾「单调读」（这里按用户固定读从库 B），上传后连刷新几次：还会倒流吗？自己的文件多久才出现？再把「读己之写」也勾上，看看这次读付出的代价在哪一格。</li>
+</ol>
+
+<h2>词与短语</h2>
+<p class="lede">词条按在书里出现的顺序排，按节分组；读一节之前先把这一节的过一遍，读的时候就不用停。斜体小字是原句里连续的几个词，在电子书里搜它就能找到那一句。标着「每个字都认识」的，是字面意思会把你带偏的。行话（quorum、failover 这类）不在这里，在上面的术语表里。</p>
+
+<h3 class="sec-head" id="s0">§0 <span class="first">Replication means keeping a copy…</span></h3>
+<div class="entry"><div class="en">go back in time</div><div class="loc" data-p="11">… you can go back in time. …</div><div class="zh">回到过去（某一刻的数据状态）</div><div class="note">备份能做到，复制做不到：副本总是紧跟着最新的状态。</div></div>
+
+<h3 class="sec-head" id="s1">§1 <span class="first">Single-Leader Replication</span></h3>
+<div class="entry"><div class="en">considered offensive</div><div class="loc" data-p="22">… it is widely considered offensive. …</div><div class="zh">被认为带有冒犯性</div><div class="note">说的是 master–slave 这个旧叫法，现在一般说 leader / follower 或 primary / replica。</div></div>
+
+<h3 class="sec-head" id="s1.1">§1.1 <span class="first">Synchronous Versus Asynchronous Replication</span></h3>
+<div class="entry"><div class="en">hardcoded</div><div class="loc" data-p="23">… other systems are often hardcoded to …</div><div class="zh">写死的（不能配置）</div></div>
+<div class="entry"><div class="en">fall behind</div><div class="loc" data-p="27">… followers might fall behind the leader …</div><div class="zh">落后于</div></div>
+<div class="entry trap"><div class="en">impracticable</div><div class="loc" data-p="29">… it is impracticable for all followers …</div><div class="zh">行不通的</div><div class="note">比 impractical（不太实际）更重：实际上就做不到。</div></div>
+<div class="entry trap"><div class="en">grind to a halt</div><div class="loc" data-p="29">… whole system to grind to a halt. …</div><div class="zh">（整个系统）停摆、卡死</div><div class="note">grind 是磨，像机器磨着磨着停下来。</div></div>
+
+<h3 class="sec-head" id="s1.2">§1.2 <span class="first">Setting Up New Followers</span></h3>
+<div class="entry trap"><div class="en">in flux</div><div class="loc" data-p="34">… the data is always in flux, …</div><div class="zh">一直在变</div><div class="note">flux 本义流动，in flux 是「处在变动中」，和流量无关。</div></div>
+<div class="entry"><div class="en">go against</div><div class="loc" data-p="35">… would go against our goal of …</div><div class="zh">违背</div></div>
+<div class="entry"><div class="en">backlog</div><div class="loc" data-p="39">… the backlog of data changes since …</div><div class="zh">积压（还没处理的改动）</div></div>
+<div class="entry trap"><div class="en">catch up</div><div class="loc" data-p="39">… we say it has caught up. …</div><div class="zh">追平（把积压的改动处理完）</div><div class="note">复制里的固定说法，从库「追上」主库。和 keep up（一直跟住、不掉队）分开记。</div></div>
+<div class="entry"><div class="en">arcane</div><div class="loc" data-p="40">… a somewhat arcane multistep workflow …</div><div class="zh">晦涩的、只有内行才懂的</div></div>
+<div class="entry"><div class="en">grapple with</div><div class="loc" data-p="48">… must grapple with trade-offs, though. …</div><div class="zh">费力应对</div><div class="note">grapple 本义扭打、抓住不放。</div></div>
+
+<h3 class="sec-head" id="s1.3">§1.3 <span class="first">Handling Node Outages</span></h3>
+<div class="entry trap"><div class="en">go down</div><div class="loc" data-p="50">… node in the system can go down, …</div><div class="zh">宕机、挂掉</div><div class="note">不是「下降」。恢复是 come back（up）。</div></div>
+<div class="entry trap"><div class="en">no foolproof way</div><div class="loc" data-p="57">… There is no foolproof way of …</div><div class="zh">没有万无一失的办法</div><div class="note">foolproof 字面是「傻瓜也不会弄错」。</div></div>
+<div class="entry trap"><div class="en">bounce back and forth</div><div class="loc" data-p="57">… frequently bounce messages back and forth …</div><div class="zh">来回互发</div><div class="note">bounce 是弹来弹去，这里指节点之间不停地互发心跳消息。</div></div>
+<div class="entry trap"><div class="en">step down</div><div class="loc" data-p="59">… have forced it to step down. …</div><div class="zh">下台、让出位置</div></div>
+<div class="entry"><div class="en">fraught with</div><div class="loc" data-p="60">… Failover is fraught with things that …</div><div class="zh">充满（风险、麻烦）</div></div>
+<div class="entry trap"><div class="en">after all</div><div class="loc" data-p="61">… weren’t durable after all. …</div><div class="zh">原来（并不）、到头来</div><div class="note">不是「毕竟」。放在句末，表示结果和原先以为的相反。</div></div>
+<div class="entry trap"><div class="en">safety catch</div><div class="loc" data-p="63">… As a safety catch, some …</div><div class="zh">保险装置</div><div class="note">本义是枪上的保险栓。</div></div>
+<div class="entry"><div class="en">glitch</div><div class="loc" data-p="64">… or a network glitch could cause …</div><div class="zh">小故障、短暂失灵</div></div>
+
+<h3 class="sec-head" id="s1.4">§1.4 <span class="first">Implementation of Replication Logs</span></h3>
+<div class="entry trap"><div class="en">break down</div><div class="loc" data-p="70">… it can break down in …</div><div class="zh">失效、行不通</div><div class="note">不只是机器坏了：一种做法 break down，是它在某些情况下不成立。</div></div>
+<div class="entry"><div class="en">work around</div><div class="loc" data-p="74">… It is possible to work around …</div><div class="zh">绕过（问题）</div></div>
+<div class="entry trap"><div class="en">may seem like a minor detail</div><div class="loc" data-p="78">… may seem like a minor implementation detail …</div><div class="zh">看起来只是个小细节（其实不然）</div><div class="note">作者先往轻里说，紧接着用 but 推翻：版本不兼容，意味着升级要停机。</div></div>
+
+<h3 class="sec-head" id="s1.5">§1.5 <span class="first">Problems with Replication Lag</span></h3>
+<div class="entry"><div class="en">realistically</div><div class="loc" data-p="89">… this approach realistically works only with …</div><div class="zh">实际上、现实地说</div></div>
+<div class="entry"><div class="en">coin (a term)</div><div class="loc" data-p="91">… consistency was coined by Douglas Terry …</div><div class="zh">创造（一个词）</div></div>
+<div class="entry trap"><div class="en">battle cry</div><div class="loc" data-p="91">… became the battle cry of many …</div><div class="zh">口号</div><div class="note">本义冲锋时的呐喊。最终一致性一度成了很多 NoSQL 项目挂在嘴边的口号，带点调侃。</div></div>
+<div class="entry trap"><div class="en">deliberately vague</div><div class="loc" data-p="92">… “eventually” is deliberately vague; …</div><div class="zh">故意说得含糊</div><div class="note">作者的口吻：eventually 不给时间上限，是刻意的，不是疏忽。</div></div>
+<div class="entry"><div class="en">understandably</div><div class="loc" data-p="95">… will be understandably unhappy. …</div><div class="zh">可以理解地（换谁都会）</div></div>
+<div class="entry"><div class="en">negate the benefit</div><div class="loc" data-p="100">… negating the benefit of read scaling …</div><div class="zh">抵消好处</div></div>
+<div class="entry trap"><div class="en">wouldn’t be so bad</div><div class="loc" data-p="110">… This wouldn’t be so bad if …</div><div class="zh">倒也没那么糟</div><div class="note">往轻里说：先承认一种情况还能接受，再说真正让人困惑的是另一种。</div></div>
+<div class="entry"><div class="en">a lesser guarantee</div><div class="loc" data-p="111">… It’s a lesser guarantee than …</div><div class="zh">较弱的保证</div></div>
+<div class="entry trap"><div class="en">psychic powers</div><div class="loc" data-p="121">… Such psychic powers are impressive but …</div><div class="zh">未卜先知的超能力</div><div class="note">作者的玩笑：回答出现在提问之前，看上去像能预知未来。</div></div>
+
+<h3 class="sec-head" id="s1.6">§1.6 <span class="first">Solutions for Replication Lag</span></h3>
+<div class="entry trap"><div class="en">a recipe for problems down the line</div><div class="loc" data-p="126">… a recipe for problems down the line. …</div><div class="zh">迟早要出问题的做法</div><div class="note">a recipe for disaster 是常见说法，「注定出事的配方」；down the line 是「以后、将来某个时候」。</div></div>
+<div class="entry"><div class="en">embrace</div><div class="loc" data-p="128">… would have to embrace eventual consistency. …</div><div class="zh">接受（并主动采用）</div></div>
+<div class="entry"><div class="en">in the face of</div><div class="loc" data-p="130">… resilience in the face of network …</div><div class="zh">面对（困难时）</div></div>
+
+<h3 class="sec-head" id="s2.1">§2.1 <span class="first">Geographically Distributed Operation</span></h3>
+<div class="entry"><div class="en">outweigh</div><div class="loc" data-p="136">… the benefits rarely outweigh the added complexity. …</div><div class="zh">超过、抵得过</div></div>
+<div class="entry trap"><div class="en">fare</div><div class="loc" data-p="139">… multi-leader configurations fare in a …</div><div class="zh">（在某种情况下）表现如何</div><div class="note">动词 fare，不是名词「车费」。how X fares 是 X 结果怎样。</div></div>
+<div class="entry trap"><div class="en">defeat the purpose</div><div class="loc" data-p="141">… might defeat the purpose of having …</div><div class="zh">违背初衷、让……白费</div><div class="note">defeat 不是打败某人。部署多个区域本来为了快，写还都得跨洋，就白费了。</div></div>
+<div class="entry trap"><div class="en">better off</div><div class="loc" data-p="149">… you’re therefore better off with a …</div><div class="zh">（选……）更好、更划算</div></div>
+<div class="entry"><div class="en">retrofitted</div><div class="loc" data-p="151">… is a retrofitted feature in many …</div><div class="zh">后来加装的</div><div class="note">本义给旧机器加装新部件：很多数据库原本没有多主复制，是后来补上的。</div></div>
+<div class="entry trap"><div class="en">dangerous territory</div><div class="loc" data-p="151">… considered dangerous territory that should …</div><div class="zh">雷区</div><div class="note">字面「危险地带」，意思是能不碰就别碰。</div></div>
+
+<h3 class="sec-head" id="s2.2">§2.2 <span class="first">Sync Engines and Local-First Software</span></h3>
+<div class="entry trap"><div class="en">taken to the extreme</div><div class="loc" data-p="165">… between regions, taken to the extreme. …</div><div class="zh">推到极端</div><div class="note">每台设备就是一个「区域」，只是网络差到了极点。</div></div>
+<div class="entry"><div class="en">albeit</div><div class="loc" data-p="169">… albeit one that doesn’t support …</div><div class="zh">尽管、虽然</div></div>
+<div class="entry"><div class="en">intermittent</div><div class="loc" data-p="172">… mobile devices with intermittent connectivity. …</div><div class="zh">时断时续的</div></div>
+<div class="entry"><div class="en">pioneer</div><div class="loc" data-p="176">… was pioneered by Lotus Notes in …</div><div class="zh">开创、率先做</div></div>
+<div class="entry trap"><div class="en">carry over to</div><div class="loc" data-p="177">… don’t directly carry over to other …</div><div class="zh">照搬到、同样适用于</div><div class="note">说的是一个领域的技术换到另一个领域还成不成立，不是「搬运」。</div></div>
+
+<h3 class="sec-head" id="s2.3">§2.3 <span class="first">Dealing with Conflicting Writes</span></h3>
+<div class="entry trap"><div class="en">in the first place</div><div class="loc" data-p="183">… occurring in the first place. …</div><div class="zh">从一开始就（不让它发生）</div><div class="note">不是「第一」，强调从源头上。</div></div>
+<div class="entry"><div class="en">coincidentally</div><div class="loc" data-p="187">… If the writes coincidentally have the …</div><div class="zh">碰巧</div></div>
+<div class="entry trap"><div class="en">…, though</div><div class="loc" data-p="188">… The term is misleading, though, because …</div><div class="zh">不过</div><div class="note">句中或句末的 though 表转折，相当于 however，不是「虽然」。</div></div>
+<div class="entry"><div class="en">bother</div><div class="loc" data-p="196">… than to bother the user. …</div><div class="zh">打扰、麻烦（某人）</div></div>
+<div class="entry"><div class="en">ready-made</div><div class="loc" data-p="219">… There isn’t a quick ready-made answer …</div><div class="zh">现成的</div></div>
+
+<h3 class="sec-head" id="s3">§3 <span class="first">Leaderless Replication</span></h3>
+<div class="entry"><div class="en">fashionable</div><div class="loc" data-p="221">… became a fashionable architecture for databases …</div><div class="zh">时兴的</div></div>
+<div class="entry"><div class="en">profound</div><div class="loc" data-p="223">… has profound consequences for the way …</div><div class="zh">深远的</div></div>
+
+<h3 class="sec-head" id="s3.1">§3.1 <span class="first">Writing to the Database When a Node Is Down</span></h3>
+<div class="entry trap"><div class="en">How far can we push this?</div><div class="loc" data-p="238">… How far can we push this? …</div><div class="zh">能推到多远？（极限在哪）</div><div class="note">push 是把参数往极端调：只要一个副本确认行不行？</div></div>
+<div class="entry trap"><div class="en">as you see fit</div><div class="loc" data-p="241">… the numbers as you see fit. …</div><div class="zh">按你觉得合适的来</div></div>
+<div class="entry trap"><div class="en">any number of</div><div class="loc" data-p="250">… or any number of other reasons. …</div><div class="zh">各种各样的、很多</div><div class="note">不是「任何数字」。</div></div>
+<div class="entry trap"><div class="en">on the upside</div><div class="loc" data-p="254">… On the upside, this configuration allows …</div><div class="zh">好的一面是</div></div>
+<div class="entry"><div class="en">edge case</div><div class="loc" data-p="255">… confusing in certain edge cases. …</div><div class="zh">边缘情形（少见的极端情况）</div></div>
+
+<h3 class="sec-head" id="s3.2">§3.2 <span class="first">Single-Leader Versus Leaderless Replication Performance</span></h3>
+<div class="entry trap"><div class="en">warrant</div><div class="loc" data-p="272">… bad enough to warrant a failover …</div><div class="zh">值得、足以成为……的理由</div><div class="note">动词 warrant，不是「保证书」：情况糟到值得做一次故障切换吗？</div></div>
+<div class="entry"><div class="en">under strain</div><div class="loc" data-p="274">… is already under strain. …</div><div class="zh">吃紧、不堪重负</div></div>
+
+<h3 class="sec-head" id="s3.4">§3.4 <span class="first">Detecting Concurrent Writes</span></h3>
+<div class="entry"><div class="en">transient</div><div class="loc" data-p="284">… because of a transient outage. …</div><div class="zh">短暂的</div></div>
+<div class="entry trap"><div class="en">strike sb. as</div><div class="loc" data-p="307">… that example strikes you as too inane, …</div><div class="zh">让人觉得</div><div class="note">作者自嘲：嫌购物车的例子太无聊（inane），就想象一个更严肃的场景。</div></div>
+<div class="entry"><div class="en">oblivious to</div><div class="loc" data-p="310">… oblivious to client 2’s write, …</div><div class="zh">完全不知道</div></div>
+<div class="entry"><div class="en">supersede</div><div class="loc" data-p="310">… supersedes the prior value of …</div><div class="zh">取代</div></div>
+
+<h3 class="sec-head" id="s4">§4 <span class="first">Summary</span></h3>
+<div class="entry trap"><div class="en">that’s not even considering</div><div class="loc" data-p="332">… that’s not even considering the more …</div><div class="zh">这还没算上</div><div class="note">作者在加码：光是宕机和断网就够麻烦了，更难缠的故障还没提。</div></div>
+<div class="entry"><div class="en">insidious</div><div class="loc" data-p="332">… the more insidious kinds of fault, …</div><div class="zh">隐蔽而危害大的</div></div>
+
+<div class="gate"><b>到这里先停下，去读原书</b><p>下面是读完再看的：你的预测对不对、几道换成你来选的判断题、值得细读的句子和理解检查。先看了，读书时就只是在找答案。</p></div>
+
+<h2>读完：回到你的预测</h2>
+<div class="payoff" data-bet="06-a"><div class="mine"></div>
+<p>答案是第三项（§1.5）。主库的「成功」只说明主库写好了，异步的从库什么时候跟上没有保证。读落到 A 时看得到，落到 B 时 B 还没收到这次写，文件就没了，下一次轮回 A 又出现。这里同时破坏了两个保证：刚上传就读不到，违反读己之写；看到过又消失，违反单调读。第二项是把两个从库想成一样慢了，只要读在副本之间换来换去，就会忽隐忽现。第四项说的是应用自己在客户端缓存，书里讨论的是数据库返回什么。想一想：如果把读请求固定发给 B，还会倒流吗？刚上传的文件要多久才出现？</p></div>
+<div class="payoff" data-bet="06-b"><div class="mine"></div>
+<p>答案是第四项（§2.3）。最后写入者胜给每次写打一个时间戳，同步时只留大的，另一个直接丢掉，不报错，不回滚，两个管理员都以为自己保存成功了。两次修改是并发的，谁「后」本来就没有定义，时间戳的先后基本是随机的；如果某个区域的时钟走得快，真正后保存的那次反而可能输（§2.3 讲时钟，第 9 章细说）。第一项是「保留兄弟值」的做法，不是 LWW；第五项是什么都不做的后果，LWW 恰恰能让各副本收敛到同一个值。想一想：如果这个字段换成「库存数量」，两边各扣了 3 件，LWW 会算出什么？换成自动合并的计数器呢？</p></div>
+
+<h2>判断题：换成你来选</h2>
+<p class="lede">场景都是本站编的。先选，再看解释；解释里写了对应的节号，拿不准就回原书看那一节。</p>
+<p class="quiz-score"></p>
+<div class="mcq" data-answer="1"><div class="q">这是哪种异常？最省事的修法是什么？<span class="sec">§1.5</span></div>
+  <p class="ctx">场景：客服后台的读请求随机分到三个异步从库。一位客服盯着一张工单，刷新时状态一会儿是「已处理」，一会儿又变回「处理中」。工单是别的同事处理的，不是这位客服自己改的。</p>
+  <div class="opts"><button>违反读己之写：这位客服读工单一律走主库</button><button>违反单调读：按客服的用户 ID 固定读同一个从库</button><button>违反一致前缀读：把相关的写放进同一个分片</button><button>发生了脑裂：给旧主库加上防护</button></div>
+  <div class="explain"><p>先看到新状态、再看到旧状态，是「时间倒流」，要的是单调读；书里的办法是让同一个用户总从同一个副本读，比如按用户 ID 的哈希选。读己之写只管自己写过的东西，这张工单不是这位客服改的。一致前缀读说的是有因果关系的几次写顺序颠倒，这里只有一条记录的新旧。脑裂会写坏数据，不会让同一条记录在新旧之间来回跳。</p></div></div>
+<div class="mcq" data-answer="3"><div class="q">这个应用该用哪种复制方式？<span class="sec">§2.2</span><span class="sec">§2.3</span></div>
+  <p class="ctx">场景：一个给野外勘探队用的标注应用，几个人在同一张地图上画线、加标记。山里经常一连几小时没有信号，回到营地联网后要把各人的改动合在一起，谁的标注都不能丢。</p>
+  <div class="opts"><button>单主：所有写都发到总部的主库</button><button>无主：w = n，保证每次都读到最新值</button><button>多主，冲突用最后写入者胜</button><button>每台设备一个本地副本（同步引擎），用 CRDT 自动合并</button></div>
+  <div class="explain"><p>离线也要能写，就必须让每台设备都能收写，这是多主，具体形态就是 §2.2 讲的同步引擎；谁的标注都不能丢，冲突就得自动合并而不是丢弃，CRDT 正是为此设计的。单主和 w = n 的无主都要求联网才能写。LWW 能收敛，但会悄悄丢掉并发的改动。</p></div></div>
+<div class="mcq" data-answer="0"><div class="q">把超时调到 3 秒，最可能出什么事？<span class="sec">§1.3</span></div>
+  <p class="ctx">场景：一个订单库用单主复制，团队想让故障恢复更快，把「多久没响应就判定主库死亡」从 30 秒改成 3 秒。每逢大促，主库负载很高，响应时间偶尔会冲到 4、5 秒。</p>
+  <div class="opts"><button>大促时可能触发不必要的故障切换，切换本身又加重负载</button><button>没有影响，主库没死就不会切换</button><button>一定会发生脑裂</button><button>恢复变快，而且没有任何代价</button></div>
+  <div class="explain"><p>超时只看「多久没回应」，分不清主库是死了还是忙。负载尖峰把响应拖过 3 秒，系统就会认定主库死亡并切换；书里特别提醒，系统本来就在高负载下挣扎时，一次多余的切换只会让情况更糟。脑裂是可能的后果之一，但不是必然。</p></div></div>
+<div class="mcq" data-answer="2"><div class="q">用户偶尔读到旧值，改哪一样最直接？<span class="sec">§3.1</span></div>
+  <p class="ctx">场景：一个 Dynamo 风格的数据库，n = 3，为了快把 w 和 r 都设成了 1。现在用户偶尔会读到几秒前的旧值。</p>
+  <div class="opts"><button>把副本数加到 n = 5，w、r 仍是 1</button><button>关掉读修复，减少后台写</button><button>把 w 和 r 都改成 2</button><button>改用时钟时间戳决定哪个值更新</button></div>
+  <div class="explain"><p>w + r = 2，不大于 n = 3，写过的副本和读到的副本可能完全不重叠。改成 w = r = 2 后 w + r &gt; n，读写集合至少重叠一个副本，代价是每次要多等一个副本，能容忍的宕机节点也少了。加副本而 w、r 不变，重叠只会更难；关掉读修复让旧值留得更久；时间戳只决定读到几个值时选哪个，没读到新值就选不出来。</p></div></div>
+<div class="mcq" data-answer="2"><div class="q">想做不停机的大版本升级，复制日志用哪种？<span class="sec">§1.4</span></div>
+  <p class="ctx">场景：一个 24 小时都有人下单的服务，数据库要从一个大版本升到下一个，新版本改了磁盘上的存储格式。团队希望先升级从库，再切换主库，全程不停机。</p>
+  <div class="opts"><button>基于语句的复制</button><button>直接传预写日志</button><button>逻辑（按行）日志</button><button>先关掉复制，升级完再打开</button></div>
+  <div class="explain"><p>先升级从库、再切换，要求主库是旧版本、从库是新版本时复制还能跑。逻辑日志和存储引擎的内部格式解耦，容易保持向后兼容。预写日志记的是哪个磁盘块的哪几个字节变了，存储格式一变，新旧版本就对不上。基于语句的复制有不确定函数、执行顺序的老问题，书里说很多数据库更愿意用别的方式。关掉复制就谈不上不停机切换了。</p></div></div>
+
+<h2>和本站其他书对照</h2>
+<div class="who">
+  <div><b>NFS 的陈旧缓存</b><span class="en">OSTEP 第 49 章</span>在一台客户端上改了文件，换一台客户端去读，读到的还是旧版本。这和从库落后造成的「读不到自己的写」是同一类问题：数据有好几份，更新传到别处要时间。NFS 用关闭时刷新和属性缓存来缓解，那一页的模拟器能看到超时参数怎样决定你读到新的还是旧的。<a class="go" href="/ostep/chapters/49-nfs.html">去那一页 →</a></div>
+  <div><b>AFS 的「最后写者胜」</b><span class="en">OSTEP 第 50 章</span>两台机器同时改同一个文件，AFS 保留最后关闭文件的那一份，另一份整个被覆盖。这就是 §2.3 的最后写入者胜，只不过比的是关闭的先后而不是时间戳。对照着读，能看清这种做法丢掉了什么。<a class="go" href="/ostep/chapters/50-afs.html">去那一页 →</a></div>
+</div>
+
+<h2>值得停下来的句子</h2>
+<blockquote class="quote">one of those writes is randomly chosen to be the winner and the other writes are silently discarded<cite>— §2.3。本站译：这几次写里随机挑一个当胜者，其余的悄悄丢掉。</cite></blockquote>
+<p>这是作者对「最后写入者胜」的重新定义。名字让人以为系统在尊重时间顺序，可对并发的写来说根本不存在谁先谁后，时间戳只是把随机性藏了起来。值得停下来，是因为 Cassandra、ScyllaDB 这类数据库用的就是这种办法（§3.4），用它之前要先问自己：我的应用丢得起这些写吗？</p>
+<blockquote class="quote">the resilience of a leaderless system comes from the fact that it doesn’t distinguish between the normal case and the failure case.<cite>— §3.2。本站译：无主系统的韧性，来自它不区分正常情况和故障情况。</cite></blockquote>
+<p>单主系统平时走一条路，出了故障走另一条路（故障切换），而切换前要先判断「够不够坏」，这个判断本身就会出错。无主系统每次都同时问好几个副本、用最先到的回复，慢一个、坏一个都在日常流程里消化掉了。这句话解释了为什么无主复制特别扛「灰色故障」，也说明它的韧性和它的弱一致性来自同一个设计。</p>
+
+<h2>检查一下理解</h2>
+<details class="check"><summary>1.（§0 方框）已经有三个副本了，为什么还要备份？</summary><p>副本会尽快反映每一次写，包括误删。删除同样会被复制到所有副本上，复制救不回来；备份存的是过去某个时刻的快照，才能回到误删之前。</p></details>
+<details class="check"><summary>2.（§1.1）为什么不能把所有从库都设成同步？</summary><p>同步意味着主库要等每个从库确认才算写成功。从库越多，任一个宕机或网络出问题的可能越大，而任何一个卡住，所有写都得停。</p></details>
+<details class="check"><summary>3.（§1.2）给正在运行的主库加一个新从库，为什么不能直接拷数据文件？</summary><p>拷贝期间数据一直在变，拷出来的各部分来自不同时刻，拼不成一致的状态。要先做一个一致的快照，记下它在复制日志里的位置，新从库装好快照后从这个位置往后追。</p></details>
+<details class="check"><summary>4.（§1.3）一个从库掉线很久，主库为什么左右为难？</summary><p>主库要么一直留着这个从库还没确认的日志，冒磁盘写满的风险；要么删掉，那个从库回来时就没法靠日志追，只能从备份重建。</p></details>
+<details class="check"><summary>5.（§1.4）基于语句的复制在哪几种情况下会让副本不一致？</summary><p>语句里有取当前时间、随机数这类不确定的函数；语句依赖自增列或已有数据，而各副本的执行顺序不同；触发器、存储过程这类有副作用的语句，副作用不确定。</p></details>
+<details class="check"><summary>6.（§1.5）一致前缀读为什么主要是分片数据库的问题？</summary><p>如果所有写都按同一个顺序应用，读到的总是某个一致的前缀。分片之后各分片独立处理写，没有全局顺序，有因果关系的两次写落在不同分片上，就可能一个先被读到、一个后被读到。</p></details>
+<details class="check"><summary>7.（§3.1）已经有读修复了，为什么还需要提示移交和反熵？</summary><p>读修复只在读的时候发生，很少被读的值可能一直是旧的。提示移交让别的副本先替宕机的副本收着写，等它回来再转交；反熵在后台比对副本差异，补上剩下的漏洞，只是不保证顺序，可能很慢。</p></details>
+<details class="check"><summary>8.（§3.4）服务器只看版本号，怎么知道一次写是覆盖还是并发？</summary><p>客户端写的时候带上它上次读到的版本号，表示「我是在这个版本的基础上改的」。版本号不超过它的值都已经被合并进新值，可以覆盖；比它大的是客户端没见过的，属于并发写，要保留成兄弟值。</p></details>
+<p>用一句话说这一章（写给一个没读过的朋友）：</p>
+<textarea class="note" data-key="06-oneline" placeholder="比如：……"></textarea>
+
+<h2>精彩回顾</h2>
+<p class="recall-line"><b>一句话：</b>复制的难处全在改动：单主让读的人看到延迟，多主和无主让写的人碰上冲突，没有哪一种能两头都躲开。</p>
+<div class="recall">
+  <div class="item"><b>复制不是备份</b><p>误删一行，删除会被原样复制到每个副本。想回到过去，得靠存在别处的旧快照。</p><span class="sec">§0</span></div>
+  <div class="item"><b>说了成功也会丢</b><p>异步复制下主库突然坏掉，新主库可能还没收到最后几次写；旧主库回来后，这些写通常直接扔掉。</p><span class="sec">§1.3</span></div>
+  <div class="item"><b>超时两头难</b><p>判定主库死亡的超时设长了，恢复慢；设短了，负载一高就误切换，切换本身又让局面更糟。</p><span class="sec">§1.3</span></div>
+  <div class="item"><b>刷新一下倒回去</b><p>两次读落到落后程度不同的从库，第二次比第一次还旧。让同一个用户固定读一个从库就能挡住。</p><span class="sec">§1.5</span></div>
+  <div class="item"><b>「最后」是假的</b><p>最后写入者胜，其实是在并发写里随机挑一个留下，其余悄悄丢掉；时钟一偏，真正后写的反而输。</p><span class="sec">§2.3</span></div>
+  <div class="item"><b>不分平时和故障</b><p>无主系统本来就同时问好几个副本，慢一个就用别人的回复，从来不用判断要不要故障切换。</p><span class="sec">§3.2</span></div>
+  <div class="item"><b>带着版本号来写</b><p>写的时候带上读到的版本号，服务器就知道这次写覆盖了谁、和谁并发，用不着看值本身。</p><span class="sec">§3.4</span></div>
+</div>
+
+</main>
+<script>
+(() => {
+  const root = document.getElementById("sim-06"), h = window.DD.h;
+  const $ = (r) => root.querySelector(`[data-r="${r}"]`);
+  const ROT = ["B", "A"];
+  const NAME = { L: "主库", A: "从库 A", B: "从库 B" };
+  let S;
+  function reset() {
+    S = { now: 0, writes: [], pos: { A: 0, B: 0 }, rot: 0, myLast: 0, prev: null, reads: [], last: null,
+          n: { reads: 0, stale: 0, miss: 0, back: 0, leader: 0, wait: 0 } };
+  }
+  const say = (t) => { $("say").textContent = t; };
+  const lag = (f) => (f === "A" ? 0 : Number($("lag").value));
+  // 从库在时刻 now 已经应用到第几条：写入时刻不晚于 now − 延迟 的都到了；位置只进不退
+  function sync() {
+    for (const f of ["A", "B"]) {
+      let p = 0;
+      for (const w of S.writes) if (w.t <= S.now - lag(f)) p = w.seq;
+      S.pos[f] = Math.max(S.pos[f], p);
+    }
+  }
+  const tick = (k) => { S.now += k; sync(); };
+  const label = (w) => `${w.who === "me" ? "我" : "同事"}#${w.seq}`;
+  function write(who) {
+    const w = { seq: S.writes.length + 1, who, t: S.now };
+    S.writes.push(w);
+    if (who === "me") S.myLast = w.seq;
+    const t = S.now; sync(); tick(1);
+    return `t=${t}：${who === "me" ? "你" : "同事"}上传了文件 #${w.seq}，主库写好就回复成功。从库 A 马上会收到，从库 B 要 ${lag("B")} 秒后才收到。`;
+  }
+  function read() {
+    sync();
+    const ryw = $("ryw").checked, mono = $("mono").checked;
+    let target;
+    if (mono) target = "B"; else { target = ROT[S.rot % 2]; S.rot++; }
+    let src = target, waited = 0;
+    const t0 = S.now;
+    if (ryw && S.myLast && S.pos[target] < S.myLast) {
+      if (mono) { while (S.pos.B < S.myLast && waited < 20) { waited++; tick(1); } }
+      else src = "L";
+    }
+    const p = src === "L" ? S.writes.length : S.pos[src];
+    const miss = S.myLast > p, back = S.prev != null && p < S.prev, stale = p < S.writes.length;
+    S.n.reads++; if (stale) S.n.stale++; if (miss) S.n.miss++; if (back) S.n.back++; if (src === "L") S.n.leader++; S.n.wait += waited;
+    const r = { t: t0, src, p, miss, back, waited, prevP: S.prev };
+    S.reads.push(r); S.last = r; S.prev = p;
+    tick(1);
+    let msg = `t=${t0}：这次读${mono ? "（单调读：固定读从库 B）" : ""}落到${NAME[src]}`;
+    if (src === "L") msg += `。${NAME[target]} 还没收到你的文件 #${S.myLast}，读己之写让这次改读主库`;
+    if (waited) msg += `。从库 B 还没收到你的文件 #${S.myLast}，单调读不能换副本，只好等了 ${waited} 秒它才追上`;
+    msg += `，看到 ${p} 个文件（主库上有 ${S.writes.length} 个）。`;
+    if (miss) msg += `你自己刚传的 #${S.myLast} 不见了：违反读己之写。`;
+    if (back) msg += `上一次看到 ${r.prevP} 个，这次只有 ${p} 个：时间倒流，违反单调读。`;
+    if (!miss && !back) msg += stale ? "有别人的新文件还没到，但你察觉不到异常。" : "和主库一样新。";
+    return msg;
+  }
+  function lane(label, cells, ...pills) {
+    return h("div", { class: "lane" }, h("span", { class: "lbl" }, label), ...cells, ...pills.filter(Boolean));
+  }
+  const pill = (t, cls) => h("span", { class: `pill ${cls || ""}` }, t);
+  function render() {
+    $("lagv").textContent = lag("B");
+    const st = $("stage"); st.textContent = "";
+    const shown = S.writes.slice(-10);
+    const cell = (w, upto) => h("span", { class: `cell ${w.who === "me" ? "on" : ""} ${w.seq > upto ? "dim" : ""}` }, label(w));
+    const none = () => [pill("还没有文件")];
+    st.append(lane("时刻", [pill(`t = ${S.now} 秒`, "on")]));
+    st.append(lane("主库", shown.length ? shown.map((w) => cell(w, Infinity)) : none(), S.writes.length ? pill(`到 #${S.writes.length}`) : null));
+    for (const f of ["A", "B"]) {
+      const behind = S.writes.length - S.pos[f];
+      st.append(lane(`从库 ${f} · 延迟 ${lag(f)} 秒`, shown.length ? shown.map((w) => cell(w, S.pos[f])) : none(),
+        pill(behind ? `落后 ${behind} 条` : "已追平", behind ? "bad" : "ok")));
+    }
+    const r = S.last;
+    if (r) {
+      const seen = S.writes.filter((w) => w.seq <= r.p).slice(-10);
+      st.append(lane("这次看到的", seen.length ? seen.map((w) => cell(w, Infinity)) : [pill("空文件夹")],
+        pill(`来自${NAME[r.src]}`, "on"), r.miss ? pill("看不到自己刚传的", "bad") : null,
+        r.back ? pill("比上次少：倒流", "bad") : null, r.waited ? pill(`等了 ${r.waited} 秒`, "bad") : null,
+        !r.miss && !r.back ? pill("正常", "ok") : null));
+    } else st.append(lane("这次看到的", [pill("还没刷新过")]));
+    const hist = S.reads.slice(-6).map((x) => pill(`t=${x.t} ${x.src === "L" ? "主库" : x.src}：${x.p} 个${x.miss ? "，缺自己的" : ""}${x.back ? "，倒流" : ""}`, x.miss || x.back ? "bad" : ""));
+    st.append(lane("最近几次刷新", hist.length ? hist : [pill("无")]));
+    const stats = $("stats"); stats.textContent = "";
+    for (const [v, l] of [[S.n.reads, "刷新了几次"], [S.n.stale, "读到的不是最新"], [S.n.miss, "看不到自己刚传的"], [S.n.back, "时间倒流"], [S.n.leader, "改读主库"], [S.n.wait, "为追平等了几秒"]])
+      stats.append(h("div", { class: "stat" }, h("div", { class: "v" }, String(v)), h("div", { class: "l" }, l)));
+  }
+  const act = {
+    mine: () => write("me"),
+    other: () => write("other"),
+    read: () => read(),
+    wait: () => { tick(3); return `等了 3 秒，现在 t=${S.now}。从库 B 到了 #${S.pos.B}，主库到 #${S.writes.length}。`; },
+    reset: () => { reset(); return "清空了。从「我上传一个文件」开始。"; },
+  };
+  root.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-a]"); if (!b) return;
+    say(act[b.dataset.a]()); render();
+  });
+  $("lag").addEventListener("input", () => { sync(); render(); });
+  $("ryw").addEventListener("change", () => { say($("ryw").checked ? "读己之写打开：记住你最后一次上传的位置，读到的从库还没追到这个位置，就改读主库。" : "读己之写关掉了。"); render(); });
+  $("mono").addEventListener("change", () => { say($("mono").checked ? "单调读打开：按你的用户 ID 固定读从库 B，不再在两个从库之间轮流。" : "单调读关掉了：读请求回到 B、A 轮流。"); render(); });
+  reset(); render();
+})();
+</script>
+</body>
+</html>

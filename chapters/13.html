@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 13 章 · 流式系统的哲学 · DDIA 导读</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/chapters.js"></script>
+<script src="../assets/sections.js"></script>
+<script src="../assets/dd.js"></script>
+</head>
+<body data-chapter="13">
+<main>
+
+<h2>这一章在做什么</h2>
+<div class="gist"><p>这是全书技术部分的收束，作者明说这一章比前面更有立场：不并列比较几种做法，只深入讲一种思路。思路是：一份数据只在一处写入，索引、缓存、分析表都由事件日志按同一顺序派生出来，流处理跟上新变化，批处理重算历史。作者把这看成把数据库的内部功能「拆开」放到外面，并一路延伸到用户的设备上。后半回答这样做还能不能保证正确：不用跨系统的分布式事务，靠端到端的请求 ID、按分片定序的日志和持续核查守住完整性，放松及时性。</p></div>
+<figure class="fig"><img src="../assets/img/13-visicalc.jpg" alt="绿色字符的电子表格界面：A 列是商品名，B 列数量，C 列单价，D 列金额，下面是小计、9.75% 的税和合计" loading="lazy">
+<figcaption>VisiCalc 在 Apple II 上运行的截图。从数字能看出，D 列的金额是数量乘单价，下面的小计、税和合计又由上面的格子算出：改任何一个数量，下游的格子都跟着重算。作者在 §2.2 拿 1979 年的 VisiCalc 说明，这正是他们希望整个数据系统具备的能力。<span class="src">User:Gortu，公有领域，维基共享资源</span></figcaption></figure>
+
+<h2>读之前：先预测</h2>
+<p>第 11、12 章讲了批处理和流处理怎么工作；这一章把它们当作材料，回头把全书串起来：第 4 章的索引、第 6 章的复制日志和读己之写、第 8 章的事务和两阶段提交、第 10 章的共识和全序，都会在「派生数据」的眼光下重新出现一次。读的时候要分清两样东西：书里讲过的机制，和作者在这些机制之上提出的主张。第 14 章转向伦理和社会，这一章是技术部分的最后一章。</p>
+
+<div class="bet" data-key="13-a">
+  <div class="q">一个充值服务：数据库开了可串行化隔离，消息处理用的是有「恰好一次」语义的流处理器。用户点「充值 50 元」，服务器已经提交，回包时手机信号断了，App 提示失败，用户又点了一次。会发生什么？</div>
+  <div class="opts">
+    <button>不会重复：可串行化隔离保证同一笔操作只执行一次</button>
+    <button>不会重复：流处理器的恰好一次语义会认出第二次是重复的</button>
+    <button>会充两次：第二次对服务器是新请求、对数据库是新事务，除非有一个从 App 一路带到数据库的标识</button>
+    <button>不会重复：TCP 用序列号丢掉了重复的包</button>
+    <button>第二次会因为和第一次冲突，被数据库的死锁检测拒绝</button>
+  </div>
+  <textarea class="note" data-key="13-a-bet" placeholder="你为什么这么猜？一两句就行"></textarea>
+</div>
+
+<div class="bet" data-key="13-b">
+  <div class="q">一个基于事件流、异步处理的停车位预约系统里出现了三件事。甲：用户付款后马上打开预约页，头三秒显示「待支付」，之后变成「已支付」。乙：某个停车场周六上午的预约数比车位多了 2 个。丙：一笔退款在账上记了两次。按作者对「一致性」的拆法，哪几件是等一等就会自己消失的？</div>
+  <div class="opts">
+    <button>三件都是：异步系统最终都会一致</button>
+    <button>只有甲</button>
+    <button>甲和乙</button>
+    <button>甲和丙</button>
+    <button>都不是：三件都是要修的 bug</button>
+  </div>
+  <textarea class="note" data-key="13-b-bet" placeholder="你为什么这么猜？"></textarea>
+</div>
+
+<div class="crux"><p>同一份数据要出现在数据库、搜索、缓存、分析系统里，每处一种格式。不用一个横跨所有系统的分布式事务，能不能让它们始终对得上、出了故障也不丢不重？如果能，放弃的是什么？</p></div>
+<ol class="qs">
+  <li>作者为什么说「先定一个全序」比用 CDC 还是用事件溯源更要紧？什么情况下拿不到全序？<span class="sec">§1.1</span></li>
+  <li>在数据库里执行 CREATE INDEX，和用流处理器维护一个搜索索引，哪里一样？「拆开数据库」拆的是什么？<span class="sec">§2.1</span></li>
+  <li>TCP 会去重，数据库有事务，流处理器有恰好一次，重复提交为什么还是拦不住？<span class="sec">§3.1</span></li>
+  <li>把「一致性」拆成两半以后，哪一半可以放松，放松的代价由谁来付？<span class="sec">§3.3</span></li>
+</ol>
+
+<h2>这一章的骨架</h2>
+<p>这一章分三块：§1 说为什么要派生、派生靠什么（一个全序）、它的边界在哪；§2 把派生放大成一种架构观，从数据库内部一路推到用户的设备；§3 回头算正确性的账。容易乱的是 §2 和 §3 之间：§2 讲的多是可能性和好处，§3 才回答「不用分布式事务还对不对」。读 §3 时，把它和 §1.1 里「派生数据和分布式事务」那一小节接起来读。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 390" role="img" aria-label="这一章的骨架：同一份数据要出现在很多系统里，分成数据集成、拆开数据库、追求正确三块，各自下面列出几个要点和节号，底部是代价和贯穿全章的主张">
+  <rect class="box" x="150" y="8" width="340" height="36" rx="8"/>
+  <text class="t-b" x="320" y="31" text-anchor="middle">问题：同一份数据要出现在很多系统里</text>
+  <path class="ln" d="M320 44 V62 M110 62 H530 M110 62 V80 M320 62 V80 M530 62 V80"/>
+  <rect class="b-a" x="10" y="80" width="200" height="34" rx="6"/>
+  <text class="t-b" x="110" y="102" text-anchor="middle">数据集成 §1</text>
+  <rect class="b-a" x="220" y="80" width="200" height="34" rx="6"/>
+  <text class="t-b" x="320" y="102" text-anchor="middle">拆开数据库 §2</text>
+  <rect class="b-a" x="430" y="80" width="200" height="34" rx="6"/>
+  <text class="t-b" x="530" y="102" text-anchor="middle">追求正确 §3</text>
+  <rect class="box" x="10" y="128" width="200" height="34" rx="6"/>
+  <text x="110" y="150" text-anchor="middle">只写一处，其余派生 §1.1</text>
+  <rect class="b-warn" x="10" y="170" width="200" height="34" rx="6"/>
+  <text x="110" y="192" text-anchor="middle">全序：有用，也有极限 §1.1</text>
+  <rect class="box" x="10" y="212" width="200" height="34" rx="6"/>
+  <text x="110" y="234" text-anchor="middle">批与流：跟上和重算 §1.2</text>
+  <rect class="box" x="220" y="128" width="200" height="34" rx="6"/>
+  <text x="320" y="150" text-anchor="middle">联邦统一读，拆开统一写 §2.1</text>
+  <rect class="box" x="220" y="170" width="200" height="34" rx="6"/>
+  <text x="320" y="192" text-anchor="middle">应用代码 = 派生函数 §2.2</text>
+  <rect class="box" x="220" y="212" width="200" height="34" rx="6"/>
+  <text x="320" y="234" text-anchor="middle">读写路径推到终端 §2.3</text>
+  <rect class="box" x="430" y="128" width="200" height="34" rx="6"/>
+  <text x="530" y="150" text-anchor="middle">端到端的请求 ID §3.1</text>
+  <rect class="box" x="430" y="170" width="200" height="34" rx="6"/>
+  <text x="530" y="192" text-anchor="middle">用日志实施约束 §3.2</text>
+  <rect class="b-warn" x="430" y="212" width="200" height="34" rx="6"/>
+  <text x="530" y="234" text-anchor="middle">及时性 ≠ 完整性 §3.3</text>
+  <rect class="box" x="430" y="254" width="200" height="34" rx="6"/>
+  <text x="530" y="276" text-anchor="middle">信任，但要核查 §3.4</text>
+  <rect class="b-bad" x="10" y="302" width="620" height="34" rx="6"/>
+  <text x="320" y="324" text-anchor="middle">代价：读到的不一定最新；全序有上限；多几套要运维的部件</text>
+  <rect class="b-ok" x="10" y="346" width="620" height="34" rx="6"/>
+  <text x="320" y="368" text-anchor="middle">贯穿全章（作者的主张）：一条事件日志 → 确定性的派生 → 很多视图</text>
+</svg>
+<figcaption>本站画的全章结构。两个黄色格子是这一章论证的两个转折点：§1.1 承认全序有极限，§3.3 把「一致性」拆开，后面关于正确性的说法都建立在这次拆分上。</figcaption>
+</figure>
+<p class="lede">边读边填：每行一个问题，读到答案就写一两句。只存在你这台设备的浏览器里，别人看不到。</p>
+<div class="table-wrap"><table class="findit">
+  <tr><th>要找的</th><th>带着这个问题读，找到了就写下来</th></tr>
+  <tr><td>派生和事务</td><td><p class="q">两者最大的区别是什么？作者为什么暂时押在日志派生这一边？<span class="sec">§1.1</span></p><input class="note" data-key="13-f1" aria-label="派生和事务：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>全序的极限</td><td><p class="q">哪几种部署方式让你拿不到一个全局的先后顺序？<span class="sec">§1.1</span></p><input class="note" data-key="13-f2" aria-label="全序的极限：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>渐进迁移</td><td><p class="q">派生视图怎么让改数据结构不必一刀切？好处落在哪里？<span class="sec">§1.2</span></p><input class="note" data-key="13-f3" aria-label="渐进迁移：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>联邦和拆开</td><td><p class="q">一个统一读、一个统一写。作者说哪一个更难，为什么？<span class="sec">§2.1</span></p><input class="note" data-key="13-f4" aria-label="联邦和拆开：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>不发请求</td><td><p class="q">汇率的例子里，数据流的做法用什么替代了同步调用？带来了什么新麻烦？<span class="sec">§2.2</span></p><input class="note" data-key="13-f5" aria-label="不发请求：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>原子性从哪来</td><td><p class="q">跨三个分片的付款不用原子提交，原子性靠的是哪一步？<span class="sec">§3.2</span></p><input class="note" data-key="13-f6" aria-label="原子性从哪来：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>两种「一致」</td><td><p class="q">及时性和完整性，各自被违反了会怎样？<span class="sec">§3.3</span></p><input class="note" data-key="13-f7" aria-label="两种一致：你的答案" placeholder="你的答案"></td></tr>
+</table></div>
+<details class="reveal"><summary>读完了？对照我找到的</summary><ul>
+  <li>派生和事务：事务通常保证写完立刻读到新值，异步派生默认不保证；作者认为好的分布式事务协议短期内不会普及，日志派生是眼下最有希望的路。</li>
+  <li>全序的极限：吞吐超过一台主节点要分片；跨地区各有各的主；微服务各管各的状态；客户端离线时先改本地。</li>
+  <li>渐进迁移：新旧结构作为同一份数据的两个派生视图并存，用户一点点挪过去，每一步都能退回，所以敢动、改得快。</li>
+  <li>联邦和拆开：联邦只要把一种数据模型映射成另一种，不难；让多处的写保持同步才是难的工程问题。</li>
+  <li>不发请求：提前订阅汇率变化存进本地库，下单时查本地；代价是连接和时间有关，重放旧数据时要用当时的汇率。</li>
+  <li>原子性从哪来：最初那条请求写进日志是原子的，写进去之后，下游的事件迟早都会写出来（可能有重复，靠 ID 去掉）。</li>
+  <li>两种一致：违反及时性是暂时的，等一等再读就好；违反完整性是永久的，要显式地检查和修复。</li>
+</ul></details>
+
+<h2>分节地图</h2>
+<p class="lede">全章约 1.7 万词，建议分五次读。前两次讲架构上的主张，第三次从读写路径过渡到正确性，第四次是全章最需要慢读的地方（约束、及时性和完整性），最后一次轻松些。</p>
+<ol class="secmap">
+  <li class="sit">第一次坐下<span>§0–§1.2 · 约 3000 词 · 为什么要派生，派生靠什么</span></li>
+  <li data-sec="0"><b>In Chapter 2 we discussed the…<span class="w">约 100 词</span></b><span class="cn">开篇</span><span class="what">作者交代这一章的定位：只讲一种思路，立场比前面各章鲜明。</span></li>
+  <li data-sec="1"><b>Data Integration<span class="w">约 300 词</span></b><span class="cn">数据集成</span><span class="what">没有一种软件能包办所有用法，把几种拼在一起成了常态。</span></li>
+  <li data-sec="1.1"><b>Combining Specialized Tools by Deriving Data<span class="w">约 1500 词</span></b><span class="cn">用派生数据组合专用工具</span><span class="what">先定写入顺序再派生；和分布式事务比；全序拿不到时怎么保住因果。</span></li>
+  <li data-sec="1.2"><b>Batch and Stream Processing<span class="w">约 1100 词</span></b><span class="cn">批处理与流处理</span><span class="what">两者都在维护派生状态；重新处理历史数据怎样让系统渐进演化。别跳过铁路轨距的方框。</span></li>
+  <li class="sit">第二次坐下<span>§2–§2.2 · 约 3700 词 · 把数据库拆开，应用围绕数据流</span></li>
+  <li data-sec="2"><b>Unbundling Databases<span class="w">约 300 词</span></b><span class="cn">拆开数据库</span><span class="what">Unix 和关系数据库两种信息管理哲学的对照，这一节想两头兼得。</span></li>
+  <li data-sec="2.1"><b>Composing Data Storage Technologies<span class="w">约 1500 词</span></b><span class="cn">组合多种存储技术</span><span class="what">建索引和维护派生系统有多像；联邦和拆开；什么时候不该拆。</span></li>
+  <li data-sec="2.2"><b>Designing Applications Around Dataflow<span class="w">约 1900 词</span></b><span class="cn">围绕数据流设计应用</span><span class="what">应用代码当派生函数，代码和状态分开；用汇率的例子比较同步请求和订阅。</span></li>
+  <li class="sit">第三次坐下<span>§2.3–§3.1 · 约 4600 词 · 读写路径推到终端，转入正确性</span></li>
+  <li data-sec="2.3"><b>Observing Derived State<span class="w">约 2400 词</span></b><span class="cn">观察派生状态</span><span class="what">写路径和读路径的边界，一路推到客户端；读请求也可以当事件处理。</span></li>
+  <li data-sec="3"><b>Aiming for Correctness<span class="w">约 500 词</span></b><span class="cn">追求正确</span><span class="what">有状态的系统为什么更要讲正确，现有的事务和一致性概念哪里不够。</span></li>
+  <li data-sec="3.1"><b>The End-to-End Argument for Databases<span class="w">约 1800 词</span></b><span class="cn">数据库的端到端论证</span><span class="what">重复提交为什么每一层都拦不住；端到端论证是什么，搬到数据系统里意味着什么。</span></li>
+  <li class="sit">第四次坐下<span>§3.2–§3.3 · 约 3400 词 · 约束、及时性和完整性</span></li>
+  <li data-sec="3.2"><b>Enforcing Constraints<span class="w">约 1600 词</span></b><span class="cn">实施约束</span><span class="what">唯一性为什么要共识；按值分片的日志怎么实施约束；多分片请求不用原子提交。</span></li>
+  <li data-sec="3.3"><b>Timeliness and Integrity<span class="w">约 1800 词</span></b><span class="cn">及时性与完整性</span><span class="what">把「一致性」拆成两半；哪些约束可以先违反再补偿；避免协调的系统。</span></li>
+  <li class="sit">第五次坐下<span>§3.4–§4 · 约 2100 词 · 持续核查，加小结</span></li>
+  <li data-sec="3.4"><b>Trust, but Verify<span class="w">约 1600 词</span></b><span class="cn">信任，但要核查</span><span class="what">硬件和软件都会出错，怎样持续审计数据；事件日志对审计有什么帮助。</span></li>
+  <li data-sec="4"><b>Summary<span class="w">约 500 词</span></b><span class="cn">小结</span><span class="what">全章回顾。先自己回忆一遍再读它。</span></li>
+</ol>
+
+<h2>先用中文过一遍</h2>
+<h3>派生数据：只写一处，其余按同一个顺序算出来</h3>
+<p>一份商品数据，可能同时活在交易库、搜索索引、缓存、数仓和推荐模型里。最直觉的做法是让应用把每一处都写一遍，叫双写。第 12 章已经看过它的毛病：两个人几乎同时改同一个商品，两处收到的先后可能相反，各自都「成功」了，结果永远对不上；还可能一处写成、一处失败。</p>
+<p>派生的做法是只让一处接受写入，这一处叫记录系统（system of record），其余各处都从它的变更日志里按同样的顺序算出来。先后由日志一家说了算，每个下游只要按顺序、确定性地处理，就会落到同一个结果；处理到一半崩溃，从上次的位置重放，只要处理是幂等的，重放几遍都一样。这就是第 10 章的状态机复制，只不过「副本」换成了形态各异的系统。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 300" role="img" aria-label="双写和派生的对比。左边：甲改价 29、乙改价 35，应用分别写商品库和搜索索引，两处收到的顺序相反，最后一处是 35、一处是 29。右边：甲乙只写商品库，商品库的变更日志按 1、2 的顺序把改动交给搜索索引、缓存、数仓，三处最后都是 35">
+  <defs><marker id="m13a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="18">双写：应用自己写两处</text>
+  <rect class="box" x="10" y="34" width="120" height="30" rx="5"/>
+  <text x="70" y="54" text-anchor="middle">甲：改价 29</text>
+  <rect class="box" x="170" y="34" width="120" height="30" rx="5"/>
+  <text x="230" y="54" text-anchor="middle">乙：改价 35</text>
+  <path class="ln" d="M60 64 L55 146" marker-end="url(#m13a)"/>
+  <path class="ln" d="M90 64 L200 146" marker-end="url(#m13a)"/>
+  <path class="ln" d="M200 64 L95 146" marker-end="url(#m13a)"/>
+  <path class="ln" d="M235 64 L240 146" marker-end="url(#m13a)"/>
+  <rect class="box" x="10" y="150" width="130" height="50" rx="6"/>
+  <text x="75" y="170" text-anchor="middle">商品库</text>
+  <text class="t-m" x="75" y="190" text-anchor="middle">先 29 后 35 → 35</text>
+  <rect class="box" x="160" y="150" width="130" height="50" rx="6"/>
+  <text x="225" y="170" text-anchor="middle">搜索索引</text>
+  <text class="t-m" x="225" y="190" text-anchor="middle">先 35 后 29 → 29</text>
+  <text class="t-m" x="150" y="230" text-anchor="middle">两个请求交错，两处收到的先后相反</text>
+  <rect class="b-bad" x="10" y="254" width="280" height="34" rx="6"/>
+  <text x="150" y="276" text-anchor="middle">两边都「成功」了，却永远对不上</text>
+  <path class="ln-d" d="M315 10 V290"/>
+  <text class="t-b" x="340" y="18">派生：只写一处，其余按日志算</text>
+  <rect class="box" x="340" y="34" width="110" height="30" rx="5"/>
+  <text x="395" y="54" text-anchor="middle">甲：改价 29</text>
+  <rect class="box" x="340" y="72" width="110" height="30" rx="5"/>
+  <text x="395" y="92" text-anchor="middle">乙：改价 35</text>
+  <path class="ln" d="M450 49 L478 62 M450 87 L478 74" marker-end="url(#m13a)"/>
+  <rect class="b-a" x="480" y="46" width="150" height="40" rx="6"/>
+  <text class="t-b" x="555" y="71" text-anchor="middle">商品库（记录系统）</text>
+  <path class="ln-a" d="M555 86 V112" marker-end="url(#m13a)"/>
+  <text class="t-m" x="340" y="128">变更日志</text>
+  <rect class="b-warn" x="410" y="114" width="105" height="30" rx="4"/>
+  <text class="t-mono" x="462" y="134" text-anchor="middle">#1 改价 29</text>
+  <rect class="b-warn" x="525" y="114" width="105" height="30" rx="4"/>
+  <text class="t-mono" x="577" y="134" text-anchor="middle">#2 改价 35</text>
+  <path class="ln" d="M520 144 L385 182 M520 144 L485 182 M520 144 L585 182" marker-end="url(#m13a)"/>
+  <rect class="box" x="340" y="184" width="90" height="34" rx="5"/>
+  <text x="385" y="206" text-anchor="middle">搜索索引</text>
+  <rect class="box" x="440" y="184" width="90" height="34" rx="5"/>
+  <text x="485" y="206" text-anchor="middle">缓存</text>
+  <rect class="box" x="540" y="184" width="90" height="34" rx="5"/>
+  <text x="585" y="206" text-anchor="middle">数仓</text>
+  <text class="t-m" x="485" y="238" text-anchor="middle">都按 #1、#2 的顺序处理 → 都是 35</text>
+  <rect class="b-ok" x="340" y="254" width="290" height="34" rx="6"/>
+  <text x="485" y="276" text-anchor="middle">崩溃了就从上次的位置重放</text>
+</svg>
+<figcaption>本站画的示意图，价格是编的。左边的问题第 12 章讲过；右边成立的前提是：日志是唯一的写入口，下游处理是确定的、幂等的。</figcaption>
+</figure>
+<p>代价有两样。一是下游是异步追上来的，刚写完立刻去读派生出来的那一份，可能还是旧的；分布式事务通常保证读到新值，日志派生默认不保证。二是「一处定序」本身有上限：事件多到一台机器排不过来就得分片，分片之间没有先后；跨地区部署时各地区有各自的主；微服务各管各的状态；客户端离线时先改本地。书里有一个社交网络的例子，说明丢掉事件之间的因果顺序，会让一条通知发给不该收到的人。</p>
+<p>派生还带来一个好处：可以重算。想换一种数据结构，不必一次性迁移，而是从同一份原始数据再派生一个新视图，新旧并存，先让少量用户走新的，没问题再逐步扩大，出了问题随时退回旧的。</p>
+<figure class="fig"><img src="../assets/img/13-mixed-gauge.jpg" alt="一段保存下来的老铁路线，中间那条轨道铺了三根钢轨，两边是普通的两轨线路和信号杆" loading="lazy">
+<figcaption>英国迪德科特铁路中心（Didcot Railway Centre）保存的混合轨距线路，中间那条能看到三根钢轨，宽轨距的车和标准轨距的车可以在同一条线上跑。§1.2 的方框讲的就是这种「加第三根轨」的做法：新旧两种轨距并存，等旧车都换完再拆掉多出来的那根，和新旧两个派生视图并存是同一个思路。<span class="src">Rosser1954，CC BY-SA 4.0，维基共享资源</span></figcaption></figure>
+
+<h3>拆开数据库，和读写路径的边界</h3>
+<p>在数据库里执行 CREATE INDEX，数据库会对表拍一个一致的快照，扫一遍建出索引，再补上建索引期间新来的写，之后每次写表都顺手更新索引。把「表」换成记录系统、「索引」换成搜索服务或缓存、「顺手更新」换成变更数据捕获加流处理器，就是上一节的派生。作者由此主张：一个组织里的全部数据流，可以看成一个巨大的数据库，流处理器相当于触发器和物化视图的维护逻辑，各个派生系统相当于不同类型的索引，只是分散在不同机器上、归不同团队管。这叫拆开（unbundling）数据库。另一条路是联邦数据库（federated database）：在许多存储之上盖一层统一的查询接口。前者统一的是写，后者统一的是读。</p>
+<p>派生出来的东西放在哪一层，决定了一次请求的工作怎么分配。数据一写进来就做的部分叫写路径，有人来读时才做的部分叫读路径，派生数据集就是两条路相遇的地方。缓存、索引、物化视图做的事情都一样：把这条边界往读的那一侧推，写的时候多做一点，读的时候省一点。推到最远，就是服务器把变化一路推送到用户设备上，作者把这看作写路径延伸到了终端用户。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 300" role="img" aria-label="同一个功能（商家平均评分）的四种做法，每一行是一条从写到读的长条，蓝色是写时做的部分，绿色是读时做的部分。从上到下，分界线越来越靠右：什么都不存、存总分和条数、缓存整页、推到用户手机">
+  <defs><marker id="m13b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="18">例子：外卖平台列表页上的「商家平均评分」</text>
+  <text class="t-a" x="170" y="44">写路径：数据一来就做</text>
+  <text class="t-ok" x="630" y="44" text-anchor="end">读路径：有人问才做</text>
+  <text x="10" y="80">① 什么都不存</text>
+  <rect class="b-a" x="170" y="58" width="30" height="34" rx="4"/>
+  <rect class="b-ok" x="200" y="58" width="430" height="34" rx="4"/>
+  <text x="214" y="80">读：扫这家的全部评价，再求平均</text>
+  <text x="10" y="130">② 存总分和条数</text>
+  <rect class="b-a" x="170" y="108" width="190" height="34" rx="4"/>
+  <rect class="b-ok" x="360" y="108" width="270" height="34" rx="4"/>
+  <text x="180" y="130">写：总分加星级，条数加一</text>
+  <text x="374" y="130">读：做一次除法</text>
+  <text x="10" y="180">③ 缓存商家整页</text>
+  <rect class="b-a" x="170" y="158" width="330" height="34" rx="4"/>
+  <rect class="b-ok" x="500" y="158" width="130" height="34" rx="4"/>
+  <text x="180" y="180">写：重算评分，把整页渲染好存起来</text>
+  <text x="514" y="180">读：直接取</text>
+  <text x="10" y="230">④ 推到用户手机</text>
+  <rect class="b-a" x="170" y="208" width="440" height="34" rx="4"/>
+  <rect class="b-ok" x="610" y="208" width="20" height="34" rx="4"/>
+  <text x="180" y="230">写：算好后经长连接推给每台在线的设备</text>
+  <text class="t-m" x="10" y="270">两种颜色的交界就是派生数据集所在的位置：越往右，写时做得越多，读时越省</text>
+  <text class="t-m" x="10" y="290">④ 第一次打开仍要读一次初始状态；断线后按上次读到的位置补上漏掉的变化</text>
+</svg>
+<figcaption>本站画的示意图。哪一行最好，取决于评价写入和列表被看的频率；作者的论点只是这条线可以挪，挪到哪是取舍。</figcaption>
+</figure>
+
+<h3>端到端：去重要从发起请求的那一端做起</h3>
+<p>重试会带来重复：一次操作也许其实成功了，只是确认没传回来。底层各有各的去重办法，但各管一段。TCP 用序列号去重，只在一条连接之内有效；数据库的事务通常和一条客户端连接绑在一起；流处理器的恰好一次，管的是它自己处理消息的那一段。手机信号断在「服务器已提交、回包还没到」的那一刻，用户看到失败、再点一次，对服务器是一个新请求，对数据库是一个新事务，哪一层都认不出它是重复的。</p>
+<p>办法是让发起请求的那一端生成一个请求 ID，一路带到数据库，在数据库里对它建唯一约束：同一个 ID 第二次插入就失败。这是 Saltzer、Reed、Clark 1984 年的论文《End-to-End Arguments in System Design》提出的端到端论证（end-to-end argument）在数据系统里的样子：有些功能只有通信两端的应用自己才能做完整、做对，底层提供的版本只能降低出事的概率。书里还把同一个论证用到校验和与加密上。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 340" role="img" aria-label="一次充值请求的泳道图：手机 App、应用服务器、数据库三条线。第一次请求带着 ID r7，数据库提交成功，但回包在路上丢了；App 显示失败，用户再点，新连接上发出同一个 ID r7，数据库发现 r7 已存在，拒绝，不再加钱">
+  <defs><marker id="m13c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <rect class="b-a" x="20" y="8" width="120" height="30" rx="6"/>
+  <text class="t-b" x="80" y="28" text-anchor="middle">手机 App</text>
+  <rect class="b-a" x="260" y="8" width="120" height="30" rx="6"/>
+  <text class="t-b" x="320" y="28" text-anchor="middle">应用服务器</text>
+  <rect class="b-a" x="500" y="8" width="120" height="30" rx="6"/>
+  <text class="t-b" x="560" y="28" text-anchor="middle">数据库</text>
+  <path class="ln-d" d="M80 38 V310 M320 38 V310 M560 38 V310"/>
+  <text x="200" y="62" text-anchor="middle">充值 50，ID = r7</text>
+  <path class="ln" d="M80 70 H316" marker-end="url(#m13c)"/>
+  <text x="440" y="92" text-anchor="middle">插入 r7；余额加 50</text>
+  <path class="ln" d="M320 100 H556" marker-end="url(#m13c)"/>
+  <text x="440" y="122" text-anchor="middle">提交成功</text>
+  <path class="ln" d="M560 130 H324" marker-end="url(#m13c)"/>
+  <text class="t-bad" x="230" y="152" text-anchor="middle">回包丢了：信号断了</text>
+  <path class="ln-bad" d="M320 160 H170"/>
+  <rect class="b-warn" x="10" y="176" width="200" height="30" rx="5"/>
+  <text x="110" y="196" text-anchor="middle">显示失败，用户再点一次</text>
+  <text x="200" y="230" text-anchor="middle">新连接再发：同一个 r7</text>
+  <path class="ln-a" d="M80 238 H316" marker-end="url(#m13c)"/>
+  <text x="440" y="260" text-anchor="middle">插入 r7</text>
+  <path class="ln-a" d="M320 268 H556" marker-end="url(#m13c)"/>
+  <rect class="b-ok" x="400" y="280" width="230" height="30" rx="5"/>
+  <text x="515" y="300" text-anchor="middle">r7 已存在：拒绝，不再加钱</text>
+  <text class="t-m" x="10" y="334">没有 r7：第二次对服务器是新请求、对数据库是新事务，一共充了 100</text>
+</svg>
+<figcaption>本站画的示意图。ID 要在第一次点击时就生成，重试时复用；在服务器上每收到一次请求才生成，就又回到了原来的问题。</figcaption>
+</figure>
+
+<h3>约束、及时性和完整性</h3>
+<p>用户名不能重复、库存不能为负，这类约束要在并发的请求里定出谁先谁后，第 10 章说过这等价于共识。放到日志里，做法是按要约束的那个值给日志分片：同一个值的请求必然落进同一个分片，一个分片由一个处理器单线程、按顺序地读，排在前面的赢。分片之间互不相干，所以可以加分片来扩展。</p>
+<p>一个请求涉及好几个分片时，也不一定要跨分片的原子提交。下图是本站换的例子：用一张优惠券下单，券只能用一次，下单成功后要给商家入账、给用户加积分。请求先作为一条事件写进按券号分片的日志，这一步是原子的；处理器确定性地做判断，再往别的分片发出带着同一个请求 ID 的事件；崩溃重来时，它会作出同样的判断、发出同样的事件，下游按 ID 丢掉重复的。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 300" role="img" aria-label="用日志和流处理器处理一个跨三个分片的请求：请求 r9 用券 C5 下单，先写进按券号分片的日志，券处理器单线程按顺序读，判断券没用过，就往商家分片发入账 r9、往用户分片发积分加 20 r9，两个下游处理器按 ID 去重。底部说明崩溃后重放的行为和原子性的来源">
+  <defs><marker id="m13d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <rect class="b-ok" x="10" y="34" width="150" height="50" rx="6"/>
+  <text class="t-b" x="85" y="55" text-anchor="middle">请求 r9</text>
+  <text x="85" y="74" text-anchor="middle">用券 C5 下单</text>
+  <path class="ln-a" d="M160 56 H188" marker-end="url(#m13d)"/>
+  <text class="t-m" x="190" y="26">券分片的日志（按券号分）</text>
+  <rect class="box" x="190" y="34" width="190" height="30" rx="4"/>
+  <text class="t-mono" x="200" y="54">… r3 │ r8 │ r9</text>
+  <path class="ln" d="M285 64 V82" marker-end="url(#m13d)"/>
+  <rect class="b-a" x="176" y="84" width="218" height="54" rx="6"/>
+  <text class="t-b" x="285" y="105" text-anchor="middle">券处理器（按序、单线程）</text>
+  <text class="t-m" x="285" y="126" text-anchor="middle">本地记：哪些券已用、见过哪些 ID</text>
+  <path class="ln" d="M394 100 L418 62" marker-end="url(#m13d)"/>
+  <path class="ln" d="M394 120 L418 140" marker-end="url(#m13d)"/>
+  <path class="ln-d" d="M176 128 L120 146"/>
+  <rect class="b-warn" x="420" y="40" width="210" height="30" rx="4"/>
+  <text x="525" y="60" text-anchor="middle">商家分片：入账 r9</text>
+  <rect class="box" x="420" y="76" width="210" height="30" rx="4"/>
+  <text class="t-m" x="525" y="96" text-anchor="middle">商家处理器：见过 r9 就丢掉</text>
+  <rect class="b-warn" x="420" y="130" width="210" height="30" rx="4"/>
+  <text x="525" y="150" text-anchor="middle">用户分片：积分加 20，r9</text>
+  <rect class="box" x="420" y="166" width="210" height="30" rx="4"/>
+  <text class="t-m" x="525" y="186" text-anchor="middle">积分处理器：见过 r9 就丢掉</text>
+  <text class="t-m" x="10" y="160">券已用过：发「拒绝 r9」</text>
+  <text class="t-m" x="10" y="180">用户在输出流上等结果</text>
+  <rect class="b-warn" x="10" y="212" width="620" height="34" rx="6"/>
+  <text x="320" y="234" text-anchor="middle">券处理器崩溃后重放 r9：同样的判断，发出同样带 r9 的事件，下游去重</text>
+  <rect class="b-ok" x="10" y="256" width="620" height="34" rx="6"/>
+  <text x="320" y="278" text-anchor="middle">原子性来自第一步：r9 写进券分片的日志，这一步要么有、要么没有</text>
+</svg>
+<figcaption>本站画的示意图，换了一个书里没有的场景。要求只有两条：每个分片的事件严格按日志顺序、至少处理一次；处理器是确定性的。</figcaption>
+</figure>
+<p>这样做的代价是，发请求的人不能马上知道结果，要在输出流上等那条消息。作者由此把平常笼统说的「一致性」拆成两件事。及时性（timeliness）：用户看到的是不是最新状态；违反了，等一会儿再看就好。完整性（integrity）：数据有没有丢、有没有算错、有没有自相矛盾；违反了，等多久也不会自己好，要有人去查、去修。事务通常两样一起给，异步的数据流可以只保完整性、放松及时性。再往前一步：如果业务本来就有道歉和补偿的流程（超卖了就退款加赔偿），连约束的检查都可以挪到事后。作者把不需要同步协调、仍保完整性的系统叫作避免协调的（coordination-avoiding）数据系统。</p>
+
+<h3>这一章点名的系统</h3>
+<div class="sys">
+  <div><b>Debezium</b><span class="k">变更数据捕获</span> 书里说它能从很多种数据库里抽取变更流。</div>
+  <div><b>Kafka</b><span class="k">日志型消息代理</span> 书里说它的协议正在成为事件流事实上的标准。</div>
+  <div><b>Apache Beam</b><span class="k">流处理编程接口</span> 书里拿它作按事件时间开窗的例子，写好的计算可以交给 Flink 或 Google Cloud Dataflow 去跑。</div>
+  <div><b>Trino</b><span class="k">联邦查询引擎</span> 书里和 PostgreSQL 的外部数据包装器（foreign data wrapper）一起，举作联邦数据库的例子。</div>
+  <div><b>Storm</b><span class="k">流处理框架</span> 书里提到它的分布式 RPC，把一次查询当作流，在很多分片上合起来算。</div>
+  <div><b>VisiCalc</b><span class="k">电子表格</span> 1979 年的电子表格软件，作者拿它说明数据流式的自动重算。</div>
+  <div><b>Jepsen</b><span class="k">故障测试</span> Kyle Kingsbury 做的一系列实验，书里说它揭示了一些产品宣称的安全保证和故障下的实际表现差得很远。</div>
+  <div><b>HDFS、Amazon S3</b><span class="k">存储系统</span> 书里说它们不完全信任磁盘，后台不停地读回文件、和别的副本比对。</div>
+  <div><b>证书透明度</b><span class="k">Certificate Transparency</span> 用密码学校验的只追加日志和默克尔树来检查 TLS 证书，每个日志只有一个主，不需要共识协议。</div>
+</div>
+
+<div class="table-wrap"><table class="terms">
+  <tr><th>英文</th><th>中文</th><th>一句话</th></tr>
+  <tr><td>system of record</td><td><a class="term" href="../glossary.html#g-system-of-record">记录系统</a></td><td>数据最先写进、被当作权威的那一份，其余都从它派生（§1.1）。</td></tr>
+  <tr><td>derived data</td><td><a class="term" href="../glossary.html#g-derived-data">派生数据</a></td><td>由别的数据算出来、丢了可以重算的数据：索引、缓存、物化视图（§1.1）。</td></tr>
+  <tr><td>total order broadcast</td><td><a class="term" href="../glossary.html#g-total-order-broadcast">全序广播</a></td><td>让所有节点按同一顺序收到同一串消息，和共识等价（§1.1）。</td></tr>
+  <tr><td>idempotent</td><td><a class="term" href="../glossary.html#g-idempotence">幂等</a></td><td>执行一次和执行多次效果相同（§1.1、§3.1）。</td></tr>
+  <tr><td>lambda / kappa architecture</td><td>λ 架构 / κ 架构</td><td>前者批和流各跑一套，后者在同一个系统里既处理新事件、也重放历史（§1.2）。</td></tr>
+  <tr><td>unbundling</td><td>拆开（数据库）</td><td>把数据库内部维护索引、视图的功能，用独立组件加事件日志在外面拼起来（§2.1）。</td></tr>
+  <tr><td>federated database</td><td>联邦数据库</td><td>在多种存储之上提供统一的查询接口，也叫 polystore（§2.1）。</td></tr>
+  <tr><td>write path / read path</td><td>写路径 / 读路径</td><td>数据一来就做的预先计算，和有人来读时才做的计算（§2.3）。</td></tr>
+  <tr><td>exactly-once semantics</td><td><a class="term" href="../glossary.html#g-exactly-once">恰好一次语义</a></td><td>出了故障要重试，最终效果也和没出故障一样（§3.1）。</td></tr>
+  <tr><td>end-to-end argument</td><td><a class="term" href="../glossary.html#g-end-to-end">端到端论证</a></td><td>某些功能只有通信两端的应用才能完整、正确地实现（§3.1）。</td></tr>
+  <tr><td>compensating transaction</td><td>补偿事务</td><td>事后纠正一次错误操作的操作，比如退掉多扣的那一笔（§3.3）。</td></tr>
+  <tr><td>timeliness</td><td>及时性</td><td>用户看到的是不是最新状态（§3.3）。</td></tr>
+  <tr><td>integrity</td><td>完整性</td><td>数据没有丢失、没有矛盾或错误（§3.3）。</td></tr>
+  <tr><td>coordination-avoiding</td><td>避免协调的</td><td>不做同步协调、仍能保证完整性的数据系统（§3.3）。</td></tr>
+  <tr><td>auditing</td><td>审计</td><td>检查数据有没有被损坏（§3.4）。</td></tr>
+</table></div>
+
+<h2>词与短语</h2>
+<p class="lede">词条按在书里出现的顺序排，按节分组；读一节之前先把这一节的过一遍，读的时候就不用停。斜体小字是原句里连续的几个词，在电子书里搜它就能找到那一句。标着「每个字都认识」的，是字面意思会把你带偏的。行话（compaction、quorum 这类）不在这里，在上面的术语表里。</p>
+
+<h3 class="sec-head" id="s0">§0 <span class="first">In Chapter 2 we discussed the…</span></h3>
+<div class="entry trap"><div class="en">run through</div><div class="loc" data-p="4">… These themes have run through all …</div><div class="zh">贯穿</div><div class="note">不是「跑过去」，也不是「快速过一遍」：主题像一根线穿过所有章节。</div></div>
+<div class="entry"><div class="en">opinionated</div><div class="loc" data-p="5">… This chapter is more opinionated than …</div><div class="zh">立场鲜明的、有主见的</div><div class="note">软件圈常说 opinionated framework，指替你做了很多选择的框架。这里是作者提醒：后面多是主张。</div></div>
+
+<h3 class="sec-head" id="s1">§1 <span class="first">Data Integration</span></h3>
+<div class="entry"><div class="en">profusion</div><div class="loc" data-p="9">… Faced with this profusion of alternatives, …</div><div class="zh">大量、繁多</div></div>
+<div class="entry trap"><div class="en">read between the lines</div><div class="loc" data-p="9">… help you read between the lines …</div><div class="zh">读出言外之意</div><div class="note">厂商不会写自己不擅长什么，要从字里行间看出来。</div></div>
+<div class="entry trap"><div class="en">cobble together</div><div class="loc" data-p="10">… end up having to cobble together several …</div><div class="zh">（勉强）拼凑起来</div><div class="note">cobble 是补鞋，带一点「凑合」的意味。</div></div>
+
+<h3 class="sec-head" id="s1.1">§1.1 <span class="first">Combining Specialized Tools by Deriving Data</span></h3>
+<div class="entry trap"><div class="en">touch on</div><div class="loc" data-p="12">… We touched on the issue of …</div><div class="zh">（简单）提到过</div></div>
+<div class="entry trap"><div class="en">barring</div><div class="loc" data-p="14">… consistent with it (barring bugs in …</div><div class="zh">除非有、不算……的话</div><div class="note">介词，相当于 except for。不是「阻挡」。</div></div>
+<div class="entry trap"><div class="en">in charge of</div><div class="loc" data-p="15">… is “in charge” of determining the …</div><div class="zh">负责、说了算</div><div class="note">作者加了引号：两边都不是「拍板定顺序的那一个」。</div></div>
+<div class="entry trap"><div class="en">funnel through</div><div class="loc" data-p="16">… funnel all user input through a …</div><div class="zh">（像漏斗一样）全部引到一处经过</div><div class="note">funnel 当动词。§3.2 又出现一次，说的是所有请求都挤过一个节点。</div></div>
+<div class="entry trap"><div class="en">fare</div><div class="loc" data-p="18">… derived data systems fare in comparison …</div><div class="zh">表现得（怎么样）</div><div class="note">动词 fare 是「进展、表现」，how does X fare 就是「X 表现如何」，和车费无关。</div></div>
+<div class="entry trap"><div class="en">absorb costs</div><div class="loc" data-p="21">… willing to absorb their performance and …</div><div class="zh">承受（成本）</div></div>
+<div class="entry trap"><div class="en">suck it up</div><div class="loc" data-p="22">… suck it up and learn to …</div><div class="zh">忍着吧、认了吧</div><div class="note">很口语，带点不客气。作者是在反对拿这种话打发所有人，又不告诉人家该怎么应对。</div></div>
+<div class="entry trap"><div class="en">middle ground</div><div class="loc" data-p="23">… work toward a middle ground between …</div><div class="zh">折中的地带</div></div>
+
+<h3 class="sec-head" id="s1.2">§1.2 <span class="first">Batch and Stream Processing</span></h3>
+<div class="entry trap"><div class="en">flavor</div><div class="loc" data-p="40">… quite strong functional flavor (even if …</div><div class="zh">风格、味道</div><div class="note">functional flavor 是「带有函数式编程的风格」。</div></div>
+<div class="entry trap"><div class="en">contain</div><div class="loc" data-p="42">… to be contained locally, whereas distributed …</div><div class="zh">控制住、不让扩散</div><div class="note">不是「包含」。疫情、火势、故障都用 contain。</div></div>
+<div class="entry trap"><div class="en">undertaking</div><div class="loc" data-p="48">… Nevertheless, the undertaking is expensive, …</div><div class="zh">（一项）工程、事业</div><div class="note">和殡葬业的 undertaker 无关。</div></div>
+<div class="entry trap"><div class="en">the beauty of</div><div class="loc" data-p="50">… The beauty of such a gradual …</div><div class="zh">……的妙处</div></div>
+<div class="entry"><div class="en">fall out of use</div><div class="loc" data-p="51">… and has fallen out of use. …</div><div class="zh">不再有人用</div></div>
+
+<h3 class="sec-head" id="s2">§2 <span class="first">Unbundling Databases</span></h3>
+<div class="entry"><div class="en">cope with</div><div class="loc" data-p="57">… do not cope very well with …</div><div class="zh">应付、处理得了</div></div>
+<div class="entry trap"><div class="en">draw on</div><div class="loc" data-p="59">… query can draw on a lot …</div><div class="zh">利用、调用（现成的资源）</div><div class="note">不是「画」。一条短查询背后能调动优化器、索引、连接算法这一大套东西。</div></div>
+<div class="entry trap"><div class="en">the best of both worlds</div><div class="loc" data-p="61">… the best of both worlds. …</div><div class="zh">两全其美</div></div>
+
+<h3 class="sec-head" id="s2.1">§2.1 <span class="first">Composing Data Storage Technologies</span></h3>
+<div class="entry trap"><div class="en">elaborate</div><div class="loc" data-p="73">… are like elaborate implementations of triggers, …</div><div class="zh">复杂精细的</div><div class="note">形容词读 /ɪˈlæbərət/，不是动词「详细说明」。</div></div>
+<div class="entry trap"><div class="en">avenue</div><div class="loc" data-p="74">… there are two avenues by which …</div><div class="zh">途径、路子</div></div>
+<div class="entry"><div class="en">disparate</div><div class="loc" data-p="76">… combine data from disparate places can …</div><div class="zh">各不相同的、互不相干的</div></div>
+<div class="entry trap"><div class="en">two sides of the same coin</div><div class="loc" data-p="81">… are two sides of the same coin: …</div><div class="zh">一体两面</div></div>
+<div class="entry"><div class="en">manifest itself</div><div class="loc" data-p="84">… which manifests itself in two ways: …</div><div class="zh">表现为、体现在</div></div>
+<div class="entry trap"><div class="en">catch up</div><div class="loc" data-p="85">… The faulty consumer can catch up …</div><div class="zh">追上（落下的进度）</div><div class="note">消费者修好以后，从日志里把积压的消息补处理完。</div></div>
+<div class="entry"><div class="en">quirks</div><div class="loc" data-p="88">… configuration issues and operational quirks, …</div><div class="zh">（运维上的）怪脾气、奇怪的毛病</div></div>
+<div class="entry trap"><div class="en">moving parts</div><div class="loc" data-p="88">… as few moving parts as possible. …</div><div class="zh">要单独运转、会出故障的部件</div><div class="note">本义是机器里会动的零件，动的零件越多越容易坏。</div></div>
+<div class="entry trap"><div class="en">lock into</div><div class="loc" data-p="88">… may lock you into an inflexible design. …</div><div class="zh">把你锁死在（某种设计）上</div><div class="note">常见于 vendor lock-in（被厂商绑定）。</div></div>
+<div class="entry trap"><div class="en">best off</div><div class="loc" data-p="90">… you’re most likely best off simply using …</div><div class="zh">（这样做）最划算、最好</div><div class="note">be better/best off doing 是「做……更好」，不是「最好关掉」。</div></div>
+<div class="entry trap"><div class="en">come into the picture</div><div class="loc" data-p="90">… come into the picture only when …</div><div class="zh">开始起作用、有意义</div></div>
+<div class="entry"><div class="en">de facto</div><div class="loc" data-p="91">… becoming a de facto standard …</div><div class="zh">事实上的（而非正式规定的）</div></div>
+
+<h3 class="sec-head" id="s2.2">§2.2 <span class="first">Designing Applications Around Dataflow</span></h3>
+<div class="entry trap"><div class="en">notoriously</div><div class="loc" data-p="100">… feature engineering is notoriously application-specific …</div><div class="zh">出了名地（带贬义）</div><div class="note">notorious 是坏名声，和 famous 不一样。</div></div>
+<div class="entry trap"><div class="en">cookie-cutter</div><div class="loc" data-p="101">… a standard cookie-cutter function like …</div><div class="zh">千篇一律的、套模子的</div><div class="note">本义是饼干模子，一压一个样。</div></div>
+<div class="entry trap"><div class="en">afterthought</div><div class="loc" data-p="101">… somewhat of an afterthought in database …</div><div class="zh">事后才补上的东西</div><div class="note">说触发器和存储过程不是设计时的重点，是后来加上的。</div></div>
+<div class="entry"><div class="en">at will</div><div class="loc" data-p="104">… added and removed at will, …</div><div class="zh">随意地、想加就加</div></div>
+<div class="entry trap"><div class="en">separation of Church and state</div><div class="loc" data-p="104">… the separation of Church and state”. …</div><div class="zh">政教分离（这里是双关）</div><div class="note">Church 指 lambda 演算的发明者 Alonzo Church，state 指可变状态。紧接着的方框专门解释了这个笑话。</div></div>
+<div class="entry trap"><div class="en">left out</div><div class="loc" data-p="105">… so that nobody feels left out. …</div><div class="zh">被落下、被冷落</div></div>
+<div class="entry"><div class="en">renegotiate</div><div class="loc" data-p="109">… implies renegotiating the relationship between …</div><div class="zh">重新商定（两者的关系）</div></div>
+<div class="entry"><div class="en">stringent</div><div class="loc" data-p="114">… are quite stringent demands, but …</div><div class="zh">严格的、苛刻的</div></div>
+
+<h3 class="sec-head" id="s2.3">§2.3 <span class="first">Observing Derived State</span></h3>
+<div class="entry trap"><div class="en">come full circle</div><div class="loc" data-p="135">… we have come full circle! …</div><div class="zh">绕了一圈回到起点</div><div class="note">作者的一句自嘲：第 2 章的时间线例子讲的就是读写路径的边界。</div></div>
+<div class="entry"><div class="en">ingrained</div><div class="loc" data-p="147">… is deeply ingrained in our databases, …</div><div class="zh">根深蒂固的</div></div>
+<div class="entry trap"><div class="en">overkill</div><div class="loc" data-p="156">… is perhaps overkill. However, …</div><div class="zh">杀鸡用牛刀、做过头了</div></div>
+<div class="entry trap"><div class="en">run against the limits</div><div class="loc" data-p="159">… applications that run against the limits …</div><div class="zh">碰到……的天花板</div></div>
+<div class="entry trap"><div class="en">off-the-shelf</div><div class="loc" data-p="159">… conventional off-the-shelf solutions. …</div><div class="zh">现成的（买来就能用的）</div><div class="note">本义是货架上直接拿的商品，和定制相对。</div></div>
+
+<h3 class="sec-head" id="s3">§3 <span class="first">Aiming for Correctness</span></h3>
+<div class="entry trap"><div class="en">not a big deal</div><div class="loc" data-p="160">… it’s not a big deal if …</div><div class="zh">没什么大不了</div></div>
+<div class="entry"><div class="en">the tool of choice</div><div class="loc" data-p="161">… have been the tools of choice …</div><div class="zh">首选的工具</div></div>
+<div class="entry trap"><div class="en">witness</div><div class="loc" data-p="161">… seem: witness, for example, the …</div><div class="zh">看看……就知道了</div><div class="note">句首的祈使用法，引出证据。不是「目击证人」。</div></div>
+<div class="entry trap"><div class="en">flaky</div><div class="loc" data-p="163">… methods are surprisingly flaky. …</div><div class="zh">不靠谱的、时好时坏的</div><div class="note">程序员熟悉的 flaky test 就是这个词。</div></div>
+<div class="entry trap"><div class="en">get away with</div><div class="loc" data-p="165">… might be able to get away …</div><div class="zh">（侥幸）蒙混过关</div></div>
+<div class="entry trap"><div class="en">cross your fingers</div><div class="loc" data-p="165">… simply crossing your fingers and hoping …</div><div class="zh">祈祷好运</div><div class="note">交叉手指是祈求好运的手势。作者在反讽：这算不上工程方法。</div></div>
+<div class="entry trap"><div class="en">not the last word</div><div class="loc" data-p="166">… it is not the last word …</div><div class="zh">不是定论、不是终极答案</div></div>
+
+<h3 class="sec-head" id="s3.1">§3.1 <span class="first">The End-to-End Argument for Databases</span></h3>
+<div class="entry"><div class="en">cure-all</div><div class="loc" data-p="168">… it is not a cure-all …</div><div class="zh">万灵药</div></div>
+<div class="entry"><div class="en">mangled</div><div class="loc" data-p="189">… would often get mangled if …</div><div class="zh">被弄乱、被搅坏</div></div>
+<div class="entry trap"><div class="en">that is a shame</div><div class="loc" data-p="191">… That is a shame, because …</div><div class="zh">真可惜</div><div class="note">shame 在这里不是「羞耻」。</div></div>
+<div class="entry trap"><div class="en">wrap up</div><div class="loc" data-p="191">… to wrap up the high-level fault-tolerance …</div><div class="zh">封装起来</div><div class="note">不是「收尾、结束」：把高层的容错机制包进一个抽象，应用就不用操心。</div></div>
+<div class="entry trap"><div class="en">collapse</div><div class="loc" data-p="192">… collapse them down to two possible …</div><div class="zh">（把很多情况）归并、压缩成</div><div class="note">不是「倒塌」。事务把各种故障收拢成提交或中止两种结果。</div></div>
+
+<h3 class="sec-head" id="s3.2">§3.2 <span class="first">Enforcing Constraints</span></h3>
+<div class="entry"><div class="en">tackle</div><div class="loc" data-p="199">… like Raft tackle the problem of …</div><div class="zh">着手解决（难题）</div></div>
+<div class="entry trap"><div class="en">rule out</div><div class="loc" data-p="201">… replication is ruled out, because …</div><div class="zh">排除（不可行）</div></div>
+<div class="entry trap"><div class="en">more interesting</div><div class="loc" data-p="209">… becomes more interesting when several shards …</div><div class="zh">更麻烦、更难</div><div class="note">技术写作里的委婉说法：interesting 常常是「棘手」的意思，要反着读。</div></div>
+
+<h3 class="sec-head" id="s3.3">§3.3 <span class="first">Timeliness and Integrity</span></h3>
+<div class="entry"><div class="en">conflate</div><div class="loc" data-p="228">… term consistency conflates two requirements …</div><div class="zh">（把不同的东西）混为一谈</div></div>
+<div class="entry trap"><div class="en">settle</div><div class="loc" data-p="237">… banks reconcile and settle transactions asynchronously, …</div><div class="zh">结算</div><div class="note">reconcile 是对账，settle 是最终清算，都是金融行话，不是「和解」「定居」。</div></div>
+<div class="entry"><div class="en">inconsequential</div><div class="loc" data-p="238">… is fairly inconsequential. …</div><div class="zh">无关紧要的</div></div>
+<div class="entry trap"><div class="en">complimentary</div><div class="loc" data-p="249">… providing a complimentary room at …</div><div class="zh">免费赠送的</div><div class="note">和 complementary（互补的）只差一个字母，也不是「赞美的」。</div></div>
+<div class="entry trap"><div class="en">fix up</div><div class="loc" data-p="252">… fix it up later by apologizing. …</div><div class="zh">（事后）补救、修好</div></div>
+<div class="entry trap"><div class="en">after the fact</div><div class="loc" data-p="253">… check the constraint after the fact. …</div><div class="zh">事后</div></div>
+<div class="entry trap"><div class="en">patch up</div><div class="loc" data-p="254">… you can patch up the problem …</div><div class="zh">（临时）弥补、修补</div></div>
+<div class="entry trap"><div class="en">sweet spot</div><div class="loc" data-p="261">… the sweet spot with neither too …</div><div class="zh">最佳平衡点</div><div class="note">本义是球拍、球棒上击球效果最好的那一点。</div></div>
+
+<h3 class="sec-head" id="s3.4">§3.4 <span class="first">Trust, but Verify</span></h3>
+<div class="entry trap"><div class="en">battle-tested</div><div class="loc" data-p="265">… have been battle-tested by many people …</div><div class="zh">久经考验的</div></div>
+<div class="entry trap"><div class="en">creep in</div><div class="loc" data-p="266">… bugs still creep in. …</div><div class="zh">（不知不觉地）混进来</div></div>
+<div class="entry trap"><div class="en">anywhere near</div><div class="loc" data-p="267">… receive anywhere near the amount of …</div><div class="zh">（用在否定句里）远远不及</div><div class="note">don’t receive anywhere near X 是「连 X 的零头都没有」。</div></div>
+<div class="entry trap"><div class="en">live up to</div><div class="loc" data-p="269">… not always living up to our …</div><div class="zh">达到（期望、标准）</div></div>
+<div class="entry trap"><div class="en">sooner rather than later</div><div class="loc" data-p="272">… find out sooner rather than later. …</div><div class="zh">越早越好</div></div>
+<div class="entry"><div class="en">make provision for</div><div class="loc" data-p="273">… make no provision for the possibility …</div><div class="zh">为……预先做准备</div></div>
+<div class="entry"><div class="en">tamper-proof</div><div class="loc" data-p="281">… can be made tamper-proof by …</div><div class="zh">防篡改的</div></div>
+
+<div class="gate"><b>到这里先停下，去读原书</b><p>下面是读完再看的：你的预测对不对、几道换成你来选的判断题、值得细读的句子和理解检查。先看了，读书时就只是在找答案。</p></div>
+
+<h2>读完：回到你的预测</h2>
+<div class="payoff" data-bet="13-a"><div class="mine"></div>
+<p>书里的答案是第三项（§3.1）。TCP 的去重只在一条连接里有效；数据库的事务通常绑在一条客户端连接上；流处理器的恰好一次只管它处理消息的那一段。用户重点一次，走的是新连接、新请求、新事务，每一层看到的都是「第一次」。书里的办法是在客户端生成一个请求 ID，一路传到数据库，靠唯一约束挡住第二次。这正是端到端论证：底层的可靠性机制有用，但不够。想一想：如果 App 正确地复用了 ID，可服务器在写数据库之前先调了一个不认识这个 ID 的第三方支付接口，还安全吗？</p></div>
+<div class="payoff" data-bet="13-b"><div class="mine"></div>
+<p>书里的答案是第二项（§3.3）。甲是及时性问题：异步处理还没跟上，等一等再看就对了。丙是完整性被破坏：退款生效了两次，等多久也不会自己变对，要显式地查出来再修。乙最容易判错：它不是「等等就好」，但也不一定是事故。书里说很多业务本来就允许先违反约束、事后用补偿事务道歉和赔偿，前提是完整性始终守住（每一笔预约都有记录、钱没有凭空消失）。想一想：如果甲里的「待支付」持续了一整天，你还会把它归为及时性问题吗？</p></div>
+
+<h2>判断题：换成你来选</h2>
+<p class="lede">场景都是本站编的。先选，再看解释；解释里写了对应的节号，拿不准就回原书看那一节。</p>
+<p class="quiz-score"></p>
+<div class="mcq" data-answer="2"><div class="q">怎么修最划算？<span class="sec">§1.1</span></div>
+  <p class="ctx">场景：一个网店，商品存在关系数据库里，搜索用一个单独的搜索引擎。下单服务改价时先写数据库、再写搜索。偶尔有商品在搜索结果里的价格和详情页不一样，而且一直不会自己变对。</p>
+  <div class="opts"><button>给写搜索的那一步加上失败重试</button><button>把两次写放进一个跨两个系统的 XA 事务</button><button>搜索只从数据库的变更流（CDC）按顺序更新，应用不再直接写搜索</button><button>每天夜里全量重建一次搜索索引</button></div>
+  <div class="explain"><p>「不会自己变对」说明两边看到的写入顺序不同，或者一边写失败了，这是双写的典型问题。让数据库做唯一的写入口，搜索按变更日志的顺序派生，两处的先后就由同一个日志决定。重试只解决「一处失败」，解决不了并发时的顺序；XA 能保证原子性，但书里说它的容错和性能都差；夜里重建能兜底，但白天最长有一整天的不一致。</p></div></div>
+<div class="mcq" data-answer="1"><div class="q">下单服务该怎么拿运费规则？<span class="sec">§2.2</span></div>
+  <p class="ctx">场景：每次下单，下单服务都同步调用一个「运费规则服务」查当前的运费。运费规则一天改几次。上周运费服务宕了二十分钟，这二十分钟里所有下单全部失败。</p>
+  <div class="opts"><button>给运费服务多加几个副本，前面放负载均衡</button><button>下单服务提前订阅运费规则的变更流，存进本地库，下单时查本地</button><button>用两阶段提交，把查运费和写订单放进一个事务</button><button>把运费规则写死在下单服务的配置文件里，改了就重新发布</button></div>
+  <div class="explain"><p>这就是书里汇率例子的同一个结构：用订阅加本地副本，替掉一次同步的网络请求，运费服务短暂宕机时下单照常进行，只是规则可能晚到一会儿。加副本能降低宕机的概率，但每单仍多一次网络往返；查询不改数据，两阶段提交无从谈起；写死在配置里，每次改规则都要发版。要记住新麻烦：将来重算历史订单时，要用下单当时的规则，而不是现在的。</p></div></div>
+<div class="mcq" data-answer="3"><div class="q">哪一种检查本来能更早发现问题？<span class="sec">§3.1</span><span class="sec">§3.4</span></div>
+  <p class="ctx">场景：一个网盘服务，上传走 TLS，对象存储给每一块数据都存了校验和，磁盘做了 RAID。还是有用户报告，少数文件下载回来和上传时不一样。最后查出来，是一次上线的分块合并代码有 bug。</p>
+  <div class="opts"><button>把 TLS 换成更强的加密套件</button><button>RAID 再多加一块校验盘</button><button>让对象存储更频繁地在后台读回数据、比对校验和</button><button>客户端上传时算整个文件的哈希一路存下来，下载后在客户端重算比对</button></div>
+  <div class="explain"><p>TLS、存储校验和、RAID 各自只保护自己那一段。bug 在应用的合并代码里，写进存储的已经是错的数据，存储层为错数据算出的校验和照样「正确」，后台怎么比对也比对不出来。端到端的哈希把整条路径，包括应用自己的代码，都包进了检查，这是书里端到端论证用在完整性检查上的样子。</p></div></div>
+<div class="mcq" data-answer="0"><div class="q">跨地区的接单系统怎么设计？<span class="sec">§3.2</span><span class="sec">§3.3</span></div>
+  <p class="ctx">场景：一个连锁餐厅的点餐平台，每家店每个半小时最多接 80 单，系统部署在三个地区。业务方说：偶尔多接几单可以接受，后厨加个班、给等得久的顾客发张代金券就行，反正设备出故障时本来就有这套道歉流程；但绝对不能出现付了钱却没有订单记录，也不能一笔钱扣两次。</p>
+  <div class="opts"><button>各地区就近接单，请求先写成带请求 ID 的事件，再异步核对名额；超出的走补偿</button><button>所有地区的请求都同步发到一个全球主库，先占名额再付款</button><button>用 XA 事务把三个地区的名额表一起提交</button><button>各地区各自接单，不带请求 ID，月底统一对账</button></div>
+  <div class="explain"><p>业务方的要求正好是书里的区分：名额约束可以事后检查、用补偿流程修，及时性可以放松；付款不能丢、不能重，完整性必须守住，靠请求 ID 去重和不可变的事件。全球主库能严格守住名额，但每一单都要跨地区往返，那个地区一出问题就全停；XA 跨地区更慢、更脆；不带请求 ID，完整性就没有保障，月底才发现重复扣款已经太晚。</p></div></div>
+<div class="mcq" data-answer="2"><div class="q">发现余额算错以后，第一步怎么做？<span class="sec">§3.4</span></div>
+  <p class="ctx">场景：一个会员积分系统，所有积分变动都先写成不可变的事件，余额表由一个流处理任务从事件派生。上周的一次部署里，派生代码有一个 bug，现在怀疑一部分用户的余额算错了，但不知道是哪些。</p>
+  <div class="opts"><button>数据库是 ACID 的，余额不会错，先去查前端的显示逻辑</button><button>用上周部署之前的备份覆盖余额表</button><button>修好派生代码，从事件日志重新算一遍余额，和现在的表逐个比对</button><button>找出来投诉的那几个用户，手工改他们的余额</button></div>
+  <div class="explain"><p>派生是确定性的，事件又没有被改过，用修好的代码重跑一遍就能得到正确结果，和现表一比，就知道哪些用户受了影响。这正是书里说事件日志让审计和恢复更容易的地方。ACID 管不住应用代码本身的 bug；用备份覆盖会丢掉上周以来的正确变动；只改投诉的用户，没投诉的错账还留着。</p></div></div>
+
+<h2>和本站其他书对照</h2>
+<div class="who">
+  <div><b>端到端论证</b><span class="en">OSTEP 第 48 章</span>那一章用「两台机器之间可靠地传一个文件」讲同一个论证：网络协议把每个字节都确认了，文件还可能在发送方内存里或写盘时坏掉，只有传完后两端比对校验和才算数。这一章 §3.1 把它搬到了重复请求上。<a class="go" href="/ostep/chapters/48-distributed.html">去那一页 →</a></div>
+  <div><b>校验和与擦洗</b><span class="en">OSTEP 第 45 章</span>§3.4 说 HDFS、S3 后台不停地读回文件、和别的副本比对。OSTEP 那一章讲的是磁盘这一层的同一件事：静默的块损坏、校验和放在哪、定期擦洗（scrubbing），以及校验和查不出的错位写入和丢失写入。<a class="go" href="/ostep/chapters/45-data-integrity.html">去那一页 →</a></div>
+</div>
+
+<h2>值得停下来的句子</h2>
+<blockquote class="quote">The fastest and most reliable network request is no network request at all!<cite>— §2.2。本站译：最快、最可靠的网络请求，就是根本不发请求！</cite></blockquote>
+<p>这句话是汇率例子的落点，也是整个「围绕数据流设计」的卖点：与其用到时再去问，不如提前订阅变化、在本地备好。值得停下来，是因为它省掉的那次请求并没有凭空消失，而是换成了一份要保持新鲜的本地副本，以及作者紧接着承认的时间相关的连接问题。读这一章的主张时，都可以这样问一句：省下的东西换到哪里去了。</p>
+<blockquote class="quote">Violations of timeliness can be annoying and confusing, but violations of integrity can be catastrophic.<cite>— §3.3。本站译：违反及时性会让人烦恼、困惑，违反完整性则可能是灾难。</cite></blockquote>
+<p>后半章的论证都压在这句话上。只要接受「完整性比及时性要紧得多」，异步的数据流就有了站得住的理由：它放弃的是及时性，守住的是完整性。反过来，如果你的业务里有一个约束必须当场判定、事后补不回来（比如钱已经从取款机里吐出去了），这句话就提醒你，那一处还得付同步协调的代价。</p>
+
+<h2>检查一下理解</h2>
+<details class="check"><summary>1.（§1.1）应用同时写数据库和搜索索引，为什么可能永久不一致，而不只是暂时落后？</summary><p>两个并发的写到达两处的先后可能相反，两边都执行成功，最终值却不同；没有哪一方负责定顺序，也就没有谁会发现并纠正。派生的做法让一个日志定顺序，所有下游按同一顺序处理。</p></details>
+<details class="check"><summary>2.（§1.1）全序的日志在哪几种情况下难以做到？</summary><p>事件吞吐超过一台主节点，只能分片；多地区部署，各地区有各自的主；微服务各自持有状态；客户端离线时先在本地改。这些情况下，不同来源的事件之间没有确定的先后。</p></details>
+<details class="check"><summary>3.（§1.2）用派生视图做结构迁移，为什么比一次性切换安全？</summary><p>新旧结构是同一份底层数据的两个视图，可以并存；先把少量用户挪到新视图，逐步扩大，最后再删旧的。每一步都能退回，不可逆的风险小了，改起来就敢快。</p></details>
+<details class="check"><summary>4.（§2.1）在数据库里建索引的过程，和哪两件事很像？</summary><p>和给数据库加一个新的从库很像，也和在流系统里启动 CDC（先做初始快照、再跟上变更）很像：都是先处理一份一致的快照，再补上之后的变更，然后持续跟着更新。</p></details>
+<details class="check"><summary>5.（§2.1）作者说什么时候不该走「拆开」这条路？</summary><p>如果一种现成的产品已经能满足全部需求，直接用它更好。拆开追求的是覆盖更多种负载（广度），不是在单一负载上胜过专门的数据库；多一个部件就多一份学习和运维成本，为用不到的规模做设计是过早优化。</p></details>
+<details class="check"><summary>6.（§2.3）把读请求也当作事件送进流处理器，有什么用，代价是什么？</summary><p>读和写在同一个算子里相遇，相当于读请求流和数据做连接，可以借流处理器的路由和分片做跨分片的复杂查询；记下读事件还能还原用户做决定前看到了什么。代价是额外的存储和 I/O。</p></details>
+<details class="check"><summary>7.（§3.2）用日志实施用户名唯一，分几步？它为什么能扩展？</summary><p>每个申请写成一条消息，按用户名的哈希进分片；处理器顺序读，查本地记录，名字没被占就记下并发成功，否则发拒绝；申请人在输出流上等结果。同一个名字只会落在一个分片，分片之间互不相干，所以加分片就能提高吞吐。</p></details>
+<details class="check"><summary>8.（§3.4）作者说的「信任，但要核查」，在系统里具体指什么？</summary><p>不假设硬件和软件永远正确，而是持续地检查数据：把文件读回来和副本比对，定期试着从备份恢复，用事件日志和确定性的派生重算一遍结果对照。检查做得越端到端，路径上没被覆盖的环节就越少。</p></details>
+<p>用一句话说这一章（写给一个没读过的朋友）：</p>
+<textarea class="note" data-key="13-oneline" placeholder="比如：……"></textarea>
+
+<h2>精彩回顾</h2>
+<p class="recall-line"><b>一句话：</b>只写一处、其余按日志派生；不靠分布式事务，靠端到端的 ID 和持续核查守住完整性。</p>
+<div class="recall">
+  <div class="item"><b>谁来定顺序</b><p>数据库和搜索索引各自接收写入，就没有谁说了算。让一个日志定下全序，下游按同一顺序派生，就不会各走各的。</p><span class="sec">§1.1</span></div>
+  <div class="item"><b>第三根钢轨</b><p>铁路换轨距时先加一根轨，让两种车并行，旧车淘汰完再拆。数据结构的迁移也可以新旧两个视图并存，一点点挪。</p><span class="sec">§1.2</span></div>
+  <div class="item"><b>数据库外面的 CREATE INDEX</b><p>流处理器维护搜索索引、缓存，做的就是数据库建索引、维护物化视图的事，只是挪到了外面、跨了团队。</p><span class="sec">§2.1</span></div>
+  <div class="item"><b>最快的请求不发请求</b><p>提前订阅变化存在本地，替掉一次同步调用；代价是要处理时间相关的连接。</p><span class="sec">§2.2</span></div>
+  <div class="item"><b>边界可以挪</b><p>缓存、索引、物化视图都在挪写路径和读路径的分界线；推到最远，就是把变化一路推到用户屏幕上。</p><span class="sec">§2.3</span></div>
+  <div class="item"><b>重点一次就是新请求</b><p>TCP、事务、恰好一次都只管自己那一段。去重的 ID 要从客户端一路带到数据库。</p><span class="sec">§3.1</span></div>
+  <div class="item"><b>先卖了再道歉</b><p>超卖、超订、透支，很多业务本来就有补偿流程。完整性必须守住，约束的检查可以事后做。</p><span class="sec">§3.3</span></div>
+</div>
+
+</main>
+</body>
+</html>

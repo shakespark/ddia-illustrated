@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 11 章 · 批处理 · DDIA 导读</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/chapters.js"></script>
+<script src="../assets/sections.js"></script>
+<script src="../assets/dd.js"></script>
+<style>
+#sim-11 .bar { display: inline-block; height: 14px; border-radius: 3px; background: var(--accent); margin: 0 6px 0 2px; vertical-align: middle; }
+#sim-11 .bar.hot { background: var(--bad); }
+#sim-11 .grp { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-right: 10px; }
+#sim-11 .step { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+</style>
+</head>
+<body data-chapter="11">
+<main>
+
+<h2>这一章在做什么</h2>
+<div class="gist"><p>数据大到一台机器装不下、一次请求里算不完时，就交给批处理：读一批只读的输入，从头算出一份新的输出。输入不改，算错了删掉输出重跑就行。这一章先在一台机器上看排序和计数，再把同样的事搬到集群：数据放在分布式文件系统或对象存储里，编排器决定任务在哪跑、失败了怎么补，MapReduce 和数据流引擎靠「洗牌」把同一个键的数据送到一起。最后看批处理拿来做什么，结果怎么交给线上系统。</p></div>
+<figure class="fig"><img src="../assets/img/11-card-sorter.jpg" alt="博物馆里一台黑色的 IBM 080 打孔卡片排序机，机身下方一排十几个出卡格，右端是进卡口" loading="lazy">
+<figcaption>IBM 080 打孔卡片排序机，计算机出现之前的批处理。每过一遍机器只看卡片上的一列，按这一列的打孔把卡片落进下面不同的格子；按好几位数排序，就一列一列地过好几遍。这一章的分布式批处理，底下也是一个排序算法（§3.3）。<span class="src">Pargon，CC BY 2.0，维基共享资源</span></figcaption></figure>
+
+<h2>读之前：先预测</h2>
+<p>前面十章大多在讲请求和响应：在线系统收到请求，尽快给出结果。这一章换一种做法，也是全书「派生数据」这一块的开头。第 1 章分过「记录系统」和「派生数据」，批处理的输出就是派生数据；第 4 章的 LSM 树、有序段的合并、云数仓，在这里会以集群的规模再出现一次；第 7 章的按键哈希分片，就是洗牌把数据分给各个任务的办法。下一章把输入从有限的一批换成永不结束的流，第 13 章再把批处理和流处理放进同一套数据集成的思路里。</p>
+
+<div class="bet" data-key="11-a">
+  <div class="q">一份 50 GB 的订单明细，每行一单，记着买的是哪个商品。要统计每个商品卖出了多少单。机器内存 8 GB，全站一共 20 万个商品。用一个内存哈希表（商品 ID → 计数）一行行读、一行行累加，会怎样？</div>
+  <div class="opts">
+    <button>跑不动：明细比内存大得多，必须先在磁盘上排序</button>
+    <button>跑得动：哈希表里只有 20 万个商品各一个计数器，和明细有多大无关</button>
+    <button>跑得动，但会比排序慢很多倍，因为哈希表是随机访问</button>
+    <button>跑不动：哈希表要把每一行明细都存下来，最后才能计数</button>
+  </div>
+  <textarea class="note" data-key="11-a-bet" placeholder="你为什么这么猜？一两句就行"></textarea>
+</div>
+
+<div class="bet" data-key="11-b">
+  <div class="q">一个批处理作业把结果写在对象存储的 out_tmp/ 前缀下，共 2 万个对象。跑完后，想把它「改名」成 out/，好让下游一次看到全部结果。会发生什么？</div>
+  <div class="opts">
+    <button>和本地文件系统的 mv 一样，一次原子操作，瞬间完成</button>
+    <button>对象存储不支持改名，调用直接报错</button>
+    <button>只改一条目录元数据，很快，但要等缓存过期别人才看得到</button>
+    <button>要把 2 万个对象逐个复制到新的键、再删掉旧的；很慢，而且不是原子的</button>
+  </div>
+  <textarea class="note" data-key="11-b-bet" placeholder="你为什么这么猜？"></textarea>
+</div>
+
+<div class="crux"><p>数据大到一台机器放不下时，怎么把「读进来、算一遍、写出去」这件事拆给成百上千台机器，让每台只管自己那一份，最后又能把同一个键的数据凑到一起？出了错，怎么只补出错的那一小块？</p></div>
+<ol class="qs">
+  <li>内存哈希表和排序都能做计数。各在什么条件下更合适？<span class="sec">§1.3</span></li>
+  <li>对象存储和分布式文件系统，哪些操作看起来一样、其实不一样？<span class="sec">§2.2</span></li>
+  <li>两个 mapper 吐出同一个键，框架怎么保证它们落到同一个 reducer？排序在这里起什么作用？<span class="sec">§3.3</span><span class="sec">§3.4</span></li>
+  <li>批处理的结果为什么不该在任务里一条条写进线上数据库？<span class="sec">§4.4</span></li>
+</ol>
+
+<h2>这一章的骨架</h2>
+<p>这一章先在一台机器上把问题讲清（§1），再借「分布式操作系统」的类比，依次讲集群上的存储、编排、计算三层（§2–§3），最后是用途（§4）。容易乱的是 §2.3 和 §3：前者很长，调度、工作流、容错三件事混在一节里；后者从 MapReduce 讲到 SQL，中间的 §3.3 洗牌才是机制的核心，读到那里要回头和 §1.3 的排序对上。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 490" role="img" aria-label="这一章的骨架：从一台机器的批处理出发，扩展到集群上的存储、编排、计算三层，各列出做法和代价，最下面是用途和交出结果的方式">
+  <rect class="b-a" x="130" y="8" width="380" height="36" rx="8"/>
+  <text class="t-b" x="320" y="31" text-anchor="middle">问题：数据一台机器装不下，算错了要能重跑 §0</text>
+  <path class="ln" d="M320 44 V60"/>
+  <rect class="box" x="130" y="60" width="380" height="34" rx="6"/>
+  <text x="320" y="82" text-anchor="middle">一台机器：命令行管道或一段脚本 §1–§1.3</text>
+  <text class="t-m" x="520" y="74">代价：内存和磁盘</text>
+  <text class="t-m" x="520" y="90">都只有一台的量</text>
+  <path class="ln" d="M320 94 V110"/>
+  <rect class="b-a" x="80" y="110" width="480" height="34" rx="6"/>
+  <text class="t-b" x="320" y="132" text-anchor="middle">搬到集群：像一个分布式的操作系统 §2</text>
+  <path class="ln" d="M320 144 V152 M110 152 H530 M110 152 V160 M320 152 V160 M530 152 V160"/>
+  <rect class="b-a" x="10" y="160" width="200" height="32" rx="6"/>
+  <text class="t-b" x="110" y="181" text-anchor="middle">存储</text>
+  <rect class="b-a" x="220" y="160" width="200" height="32" rx="6"/>
+  <text class="t-b" x="320" y="181" text-anchor="middle">编排</text>
+  <rect class="b-a" x="430" y="160" width="200" height="32" rx="6"/>
+  <text class="t-b" x="530" y="181" text-anchor="middle">计算</text>
+  <rect class="box" x="10" y="200" width="200" height="34" rx="6"/>
+  <text x="110" y="222" text-anchor="middle">分布式文件系统 §2.1</text>
+  <rect class="box" x="10" y="242" width="200" height="34" rx="6"/>
+  <text x="110" y="264" text-anchor="middle">对象存储 §2.2</text>
+  <rect class="box" x="220" y="200" width="200" height="34" rx="6"/>
+  <text x="320" y="222" text-anchor="middle">资源怎么分 §2.3</text>
+  <rect class="box" x="220" y="242" width="200" height="34" rx="6"/>
+  <text x="320" y="264" text-anchor="middle">作业连成工作流 §2.3</text>
+  <rect class="box" x="220" y="284" width="200" height="34" rx="6"/>
+  <text x="320" y="306" text-anchor="middle">失败了只重跑一个任务 §2.3</text>
+  <rect class="box" x="430" y="200" width="200" height="34" rx="6"/>
+  <text x="530" y="222" text-anchor="middle">MapReduce §3.1</text>
+  <rect class="box" x="430" y="242" width="200" height="34" rx="6"/>
+  <text x="530" y="264" text-anchor="middle">数据流引擎 §3.2</text>
+  <rect class="b-ok" x="430" y="284" width="200" height="34" rx="6"/>
+  <text x="530" y="306" text-anchor="middle">洗牌、连接、分组 §3.3–3.4</text>
+  <rect class="box" x="430" y="326" width="200" height="34" rx="6"/>
+  <text x="530" y="348" text-anchor="middle">SQL 和 DataFrame §3.5–3.6</text>
+  <rect class="b-warn" x="10" y="372" width="200" height="34" rx="6"/>
+  <text x="110" y="394" text-anchor="middle">改名不原子，计算离数据远</text>
+  <rect class="b-warn" x="220" y="372" width="200" height="34" rx="6"/>
+  <text x="320" y="394" text-anchor="middle">公平和利用率难两全</text>
+  <rect class="b-warn" x="430" y="372" width="200" height="34" rx="6"/>
+  <text x="530" y="394" text-anchor="middle">每一步都写盘，还是丢了重算</text>
+  <path class="ln-d" d="M110 276 V372 M320 318 V372 M530 360 V372"/>
+  <rect class="b-ok" x="10" y="422" width="620" height="34" rx="6"/>
+  <text x="320" y="444" text-anchor="middle">拿来做什么 §4.1–4.3：ETL、分析、机器学习　｜　结果怎么交出去 §4.4</text>
+  <text class="t-m" x="10" y="482">黄色格子是每一层要付的代价；绿色的洗牌是 §1.3 的排序在集群上的版本</text>
+</svg>
+<figcaption>本站画的全章结构。三列对应书里「分布式操作系统」的类比：文件系统、调度器、互相传数据的程序。</figcaption>
+</figure>
+<p class="lede">边读边填：每行一个问题，读到答案就写一两句。只存在你这台设备的浏览器里，别人看不到。</p>
+<div class="table-wrap"><table class="findit">
+  <tr><th>要找的</th><th>带着这个问题读，找到了就写下来</th></tr>
+  <tr><td>排序的用处</td><td><p class="q">工作集比内存大时，为什么排序还能做下去？它和第 4 章的哪个结构是同一个思路？<span class="sec">§1.3</span></p><input class="note" data-key="11-f1" aria-label="排序的用处：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>对象存储少了什么</td><td><p class="q">和分布式文件系统比，对象存储少了哪几种操作？少了它们会怎样？<span class="sec">§2.2</span></p><input class="note" data-key="11-f2" aria-label="对象存储少了什么：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>调度的两难</td><td><p class="q">成组调度、干等、抢占，各自的毛病是什么？实际的调度器怎么办？<span class="sec">§2.3</span></p><input class="note" data-key="11-f3" aria-label="调度的两难：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>中间结果放哪</td><td><p class="q">一个任务的输出是另一个任务的输入时，MapReduce、Spark、Flink 各怎么容错？<span class="sec">§2.3</span></p><input class="note" data-key="11-f4" aria-label="中间结果放哪：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>数据流引擎省了什么</td><td><p class="q">同样的计算，数据流引擎比一串 MapReduce 作业快在哪几处？<span class="sec">§3.2</span></p><input class="note" data-key="11-f5" aria-label="数据流引擎省了什么：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>两张大表怎么连</td><td><p class="q">两边都大到要分片时，reducer 怎么把它们连起来？它的内存里要放多少东西？<span class="sec">§3.4</span></p><input class="note" data-key="11-f6" aria-label="两张大表怎么连：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>结果交给线上</td><td><p class="q">不在任务里逐条写线上库，书里给了哪两种做法？各自缺什么？<span class="sec">§4.4</span></p><input class="note" data-key="11-f7" aria-label="结果交给线上：你的答案" placeholder="你的答案"></td></tr>
+</table></div>
+<details class="reveal"><summary>读完了？对照我找到的</summary><ul>
+  <li>排序的用处：在内存里排好一块就写成有序段，再把段归并，读写盘都是顺序的；就是 LSM 树的做法。</li>
+  <li>对象存储少了什么：没有追加（多数）、硬链接、文件锁和原子改名；改名是复制再删除，改一个「目录」要逐个对象改。</li>
+  <li>调度的两难：成组调度让节点空等甚至死锁；干等会饿死；抢占浪费已做的工作。实际用 FIFO、DRF、配额等启发式。</li>
+  <li>中间结果放哪：MapReduce 写回分布式文件系统；Spark 放内存、记住怎么算出来的，丢了重算；Flink 定期做检查点。</li>
+  <li>数据流引擎省了什么：只在需要时排序，相邻算子合并成一个任务，中间状态不写 DFS，不用等上一阶段全部结束，进程复用。</li>
+  <li>两张大表怎么连：两边都按连接键洗牌，二次排序让维度那条先到；reducer 一次只记住一条维度记录。</li>
+  <li>结果交给线上：写进 Kafka 一类的流，或在作业里建好整份数据库文件再批量导入；前者要另外补「全有或全无」，后者难做增量。</li>
+</ul></details>
+
+<h2>分节地图</h2>
+<p class="lede">全章约 1.2 万词，建议分四次读。第一次是热身，命令行和存储都不难；第二次的 §2.3 最长，可以在小标题处喘口气；第三次是机制的核心，慢一点读；第四次几个用途彼此独立，§4.4 最值得细读。</p>
+<ol class="secmap">
+  <li class="sit">第一次坐下<span>§0–§2.2 · 约 3900 词 · 从一台机器的命令行到集群上的存储</span></li>
+  <li data-sec="0"><b>Much of this book so far…<span class="w">约 1100 词</span></b><span class="cn">开篇</span><span class="what">在线系统和批处理的分别，输入只读带来的好处，MapReduce 之后的变化和全章路线。</span></li>
+  <li data-sec="1"><b>Batch Processing with Unix Tools<span class="w">约 200 词</span></b><span class="cn">用 Unix 工具做批处理</span><span class="what">一行网页服务器日志里有什么，为什么日志分析是批处理的老本行。</span></li>
+  <li data-sec="1.1"><b>Simple Log Analysis<span class="w">约 400 词</span></b><span class="cn">简单的日志分析</span><span class="what">一串命令找出最热门的页面。只看每一步做了什么，不用记命令。</span></li>
+  <li data-sec="1.2"><b>Chain of Commands Versus Custom Program<span class="w">约 200 词</span></b><span class="cn">命令链和自己写程序</span><span class="what">同一件事写成一段脚本。语法的差别是表面的，执行方式的差别在下一节。</span></li>
+  <li data-sec="1.3"><b>Sorting Versus In-Memory Aggregation<span class="w">约 400 词</span></b><span class="cn">排序和内存里聚合</span><span class="what">哈希表和排序各在什么时候合适，工作集是什么。全章排序这条线的起点。</span></li>
+  <li data-sec="2"><b>Batch Processing in Distributed Systems<span class="w">约 100 词</span></b><span class="cn">分布式系统里的批处理</span><span class="what">一台机器上的文件系统、调度器、管道，到集群上各对应什么。</span></li>
+  <li data-sec="2.1"><b>Distributed Filesystems<span class="w">约 900 词</span></b><span class="cn">分布式文件系统</span><span class="what">和本地文件系统一层层对照：块、缓存、元数据、协议；方框讲共享磁盘和无共享。</span></li>
+  <li data-sec="2.2"><b>Object Stores<span class="w">约 700 词</span></b><span class="cn">对象存储</span><span class="what">对象存储和文件系统哪里不同：对象不可变、没有真目录、改名、计算和存储分开。</span></li>
+  <li class="sit">第二次坐下<span>§2.3–§3.2 · 约 3400 词 · 调度和容错，MapReduce 和数据流引擎</span></li>
+  <li data-sec="2.3"><b>Distributed Job Orchestration<span class="w">约 2000 词</span></b><span class="cn">分布式作业编排</span><span class="what">编排器的三个部件，资源怎么分配，工作流的调度，任务失败了怎么办。全章最长的一节。</span></li>
+  <li data-sec="3"><b>Batch Processing Models<span class="w">约 100 词</span></b><span class="cn">批处理的模型</span><span class="what">两种最常见的处理模型，以及为什么还要先懂 MapReduce。</span></li>
+  <li data-sec="3.1"><b>MapReduce<span class="w">约 700 词</span></b><span class="cn">MapReduce 模型</span><span class="what">mapper 和 reducer 各做什么，怎样和前面命令行的例子一一对上。</span></li>
+  <li data-sec="3.2"><b>Dataflow Engines<span class="w">约 500 词</span></b><span class="cn">数据流引擎</span><span class="what">Spark、Flink 这类引擎把整个工作流当一个作业，比 MapReduce 省在哪。</span></li>
+  <li class="sit">第三次坐下<span>§3.3–§3.6 · 约 2300 词 · 洗牌和连接，再到 SQL 和 DataFrame</span></li>
+  <li data-sec="3.3"><b>Shuffling Data<span class="w">约 700 词</span></b><span class="cn">洗牌</span><span class="what">分布式排序：map 的输出怎么按键分给各个 reduce。全章机制的核心，配合下面的模拟器读。</span></li>
+  <li data-sec="3.4"><b>Joins and Grouping<span class="w">约 600 词</span></b><span class="cn">连接和分组</span><span class="what">排好序之后，reducer 怎么一次拿到一个键的全部数据，做连接和聚合。</span></li>
+  <li data-sec="3.5"><b>Query Languages<span class="w">约 800 词</span></b><span class="cn">查询语言</span><span class="what">SQL 怎样成了批处理的共同语言；方框讲批处理和云数仓怎么越走越近。</span></li>
+  <li data-sec="3.6"><b>DataFrames<span class="w">约 300 词</span></b><span class="cn">DataFrame 数据框</span><span class="what">DataFrame 从单机搬到分布式之后，哪些地方和原来不一样。</span></li>
+  <li class="sit">第四次坐下<span>§4–§5 · 约 2500 词 · 批处理拿来做什么，结果怎么交出去</span></li>
+  <li data-sec="4"><b>Batch Use Cases<span class="w">约 200 词</span></b><span class="cn">批处理的用途</span><span class="what">什么样的活适合批处理，几个行业里的例子。</span></li>
+  <li data-sec="4.1"><b>Extract–Transform–Load<span class="w">约 400 词</span></b><span class="cn">抽取、转换、加载</span><span class="what">批处理做 ETL 的几个长处；数据流水线不再只归一个团队管。</span></li>
+  <li data-sec="4.2"><b>Analytics<span class="w">约 300 词</span></b><span class="cn">分析</span><span class="what">在批处理系统上跑分析查询：预先聚合和临时查询两种用法。</span></li>
+  <li data-sec="4.3"><b>Machine Learning<span class="w">约 500 词</span></b><span class="cn">机器学习</span><span class="what">特征、训练、批量推理、图计算，以及大模型训练前的数据处理。</span></li>
+  <li data-sec="4.4"><b>Serving Derived Data<span class="w">约 700 词</span></b><span class="cn">把派生数据交给线上</span><span class="what">算好的结果怎么送回线上：为什么不逐条写库，流和批量导入各管什么。</span></li>
+  <li data-sec="5"><b>Summary<span class="w">约 400 词</span></b><span class="cn">小结</span><span class="what">全章回顾。先自己回忆一遍再读它。</span></li>
+</ol>
+
+<h2>先用中文过一遍</h2>
+<h3>输入只读、输出重算：批处理敢重跑的前提</h3>
+<p>在线数据库里，一个写错数据的 bug 上线了，把代码回滚也收不回那些错数据。批处理作业把输入当成只读的，每次运行都从头生成输出，也不去改外部系统，于是出了错的补救很简单：修好代码，删掉坏的输出，再跑一遍。旧的输出还留着的话，直接切回去也行。这一条贯穿全章：任务失败时只要把它的半截输出删掉、换台机器重跑；工作流里上下游之间靠文件交接；结果要交给线上系统时，麻烦也恰好出在「往外写」这一步（§4.4）。代价是哪怕输入只改了一个字节，也得把整份输入重新处理一遍。</p>
+
+<h3>计数的两种做法：哈希表，还是先排序</h3>
+<p>统计「每个商品卖出了几单」，最直接的办法是一个内存哈希表，读一行加一次。它要的内存只取决于有多少个<em>不同的</em>商品，和明细有多长无关；书里把一个作业需要随机访问的那部分内存叫工作集（working set）。另一种办法是先按商品排序，相同的商品就挨在一起了，从头扫一遍、数相邻的就行。排序的好处在内存不够时显出来：在内存里排好一块，写成一个有序段，最后把几个段归并，读写盘全是顺序的。这正是第 4 章 LSM 树刷盘、合并的那一套。分布式批处理选了排序这条路，原因也在这里。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 300" role="img" aria-label="同样九条订单的两种计数方法：左边用内存哈希表边读边累加；右边每三条在内存里排好序写成一个有序段，再把三个段归并，相同的商品挨在一起后数相邻的">
+  <defs><marker id="a11a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="18">做法一：内存哈希表</text>
+  <text class="t-b" x="320" y="18">做法二：先排序（内存不够就写盘）</text>
+  <text class="t-m" x="10" y="40">输入：九条订单（只看商品 ID）</text>
+  <text class="t-mono" x="10" y="58">p07 p02 p07 p31 p02 p44 p09 p31 p07</text>
+  <path class="ln" d="M100 66 V90" marker-end="url(#a11a)"/>
+  <rect class="b-a" x="30" y="94" width="150" height="130" rx="6"/>
+  <text class="t-m" x="105" y="112" text-anchor="middle">内存里的表</text>
+  <text class="t-mono" x="50" y="134">p07 → 3</text>
+  <text class="t-mono" x="50" y="154">p02 → 2</text>
+  <text class="t-mono" x="50" y="174">p31 → 2</text>
+  <text class="t-mono" x="50" y="194">p44 → 1</text>
+  <text class="t-mono" x="50" y="214">p09 → 1</text>
+  <text class="t-m" x="10" y="250">表有几行，只看有几个不同的商品</text>
+  <text class="t-m" x="10" y="270">同一个商品卖出一百万单，也只占一行</text>
+  <text class="t-m" x="320" y="40">每三条在内存里排好，写成一个有序段</text>
+  <rect class="box" x="320" y="50" width="96" height="30" rx="5"/>
+  <text class="t-mono" x="368" y="70" text-anchor="middle">p02 p07 p07</text>
+  <rect class="box" x="426" y="50" width="96" height="30" rx="5"/>
+  <text class="t-mono" x="474" y="70" text-anchor="middle">p02 p31 p44</text>
+  <rect class="box" x="532" y="50" width="96" height="30" rx="5"/>
+  <text class="t-mono" x="580" y="70" text-anchor="middle">p07 p09 p31</text>
+  <path class="ln" d="M368 80 L450 112 M474 80 V112 M580 80 L500 112" marker-end="url(#a11a)"/>
+  <rect class="b-warn" x="380" y="116" width="190" height="30" rx="5"/>
+  <text x="475" y="136" text-anchor="middle">归并：三个段顺序读</text>
+  <path class="ln" d="M475 146 V166" marker-end="url(#a11a)"/>
+  <rect class="b-a" x="320" y="170" width="310" height="30" rx="5"/>
+  <text class="t-mono" x="475" y="190" text-anchor="middle">p02 p02 p07 p07 p07 p09 p31 p31 p44</text>
+  <text class="t-mono" x="475" y="222" text-anchor="middle">数相邻的：p02 2　p07 3　p09 1　p31 2　p44 1</text>
+  <text class="t-m" x="320" y="250">内存只要装得下一块</text>
+  <text class="t-m" x="320" y="270">块再多，也只是多几个段、多归并几轮</text>
+</svg>
+<figcaption>本站画的示意图，商品 ID 和记录是编的。两种做法结果一样；区别在内存不够时谁还撑得住。</figcaption>
+</figure>
+
+<h3>map、洗牌、reduce：同一个键怎么凑到一起</h3>
+<p>把计数搬到集群上，输入已经切成很多分片，每个分片交给一个 map 任务。map 任务对每条记录调用一次你写的 mapper，吐出若干个「键，值」对，记录之间不留任何状态。难点在下一步：两个 map 任务都吐出了「杭州」，怎么让它们最后由同一个 reduce 任务处理？办法是每个 map 任务给每个 reduce 任务在本地盘上单独写一个文件，用键的哈希值决定一条记录进哪个文件，文件里的记录边写边排好序。map 跑完后，每个 reduce 任务去各个 map 那里把属于自己的文件拉过来，归并成一个有序序列，同一个键就挨在一起了，然后对每个键调用一次 reducer。这个「分桶、排序、拉取、归并」的过程就叫洗牌（shuffle），它其实是一个分布式排序，和洗扑克牌的「打乱」正好相反。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 345" role="img" aria-label="两个 map 任务、三个 reduce 任务的洗牌：每个 map 给每个 reduce 写一个排好序的本地文件，reduce 从两个 map 拉取属于自己的文件再归并，同一个城市的记录到了同一个 reduce">
+  <defs><marker id="a11b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-m" x="10" y="16">map 任务读一个分片</text>
+  <text class="t-m" x="150" y="16">本地盘：给每个 reduce 一个文件</text>
+  <text class="t-m" x="420" y="16">reduce 任务：拉取、归并、逐键调用</text>
+  <rect class="b-a" x="10" y="28" width="120" height="110" rx="6"/>
+  <text class="t-b" x="70" y="50" text-anchor="middle">map 1</text>
+  <text x="70" y="76" text-anchor="middle">杭州 苏州</text>
+  <text x="70" y="98" text-anchor="middle">杭州 南京</text>
+  <rect class="b-a" x="10" y="168" width="120" height="110" rx="6"/>
+  <text class="t-b" x="70" y="190" text-anchor="middle">map 2</text>
+  <text x="70" y="216" text-anchor="middle">苏州 宁波</text>
+  <text x="70" y="238" text-anchor="middle">杭州 宁波</text>
+  <rect class="box" x="150" y="28" width="150" height="30" rx="5"/>
+  <text x="225" y="48" text-anchor="middle">给 r1：杭州 杭州</text>
+  <rect class="box" x="150" y="68" width="150" height="30" rx="5"/>
+  <text x="225" y="88" text-anchor="middle">给 r2：南京 苏州</text>
+  <rect class="box" x="150" y="108" width="150" height="30" rx="5"/>
+  <text class="t-m" x="225" y="128" text-anchor="middle">给 r3：（空）</text>
+  <rect class="box" x="150" y="168" width="150" height="30" rx="5"/>
+  <text x="225" y="188" text-anchor="middle">给 r1：杭州</text>
+  <rect class="box" x="150" y="208" width="150" height="30" rx="5"/>
+  <text x="225" y="228" text-anchor="middle">给 r2：苏州</text>
+  <rect class="box" x="150" y="248" width="150" height="30" rx="5"/>
+  <text x="225" y="268" text-anchor="middle">给 r3：宁波 宁波</text>
+  <path class="ln" d="M130 83 H140 M140 43 V123 M140 43 H150 M140 83 H150 M140 123 H150 M130 223 H140 M140 183 V263 M140 183 H150 M140 223 H150 M140 263 H150"/>
+  <path class="ln-a" d="M300 43 L418 64 M300 183 L418 74" marker-end="url(#a11b)"/>
+  <path class="ln" d="M300 83 L418 150 M300 223 L418 160" marker-end="url(#a11b)"/>
+  <path class="ln-d" d="M300 123 L418 244"/>
+  <path class="ln" d="M300 263 L418 254" marker-end="url(#a11b)"/>
+  <rect class="b-ok" x="420" y="38" width="210" height="62" rx="6"/>
+  <text class="t-b" x="432" y="58">reduce 1</text>
+  <text x="432" y="76">归并：杭州 杭州 杭州</text>
+  <text class="t-m" x="432" y="93">调用 1 次 → 杭州 3</text>
+  <rect class="b-ok" x="420" y="124" width="210" height="62" rx="6"/>
+  <text class="t-b" x="432" y="144">reduce 2</text>
+  <text x="432" y="162">归并：南京 苏州 苏州</text>
+  <text class="t-m" x="432" y="179">调用 2 次 → 南京 1，苏州 2</text>
+  <rect class="b-ok" x="420" y="218" width="210" height="62" rx="6"/>
+  <text class="t-b" x="432" y="238">reduce 3</text>
+  <text x="432" y="256">归并：宁波 宁波</text>
+  <text class="t-m" x="432" y="273">调用 1 次 → 宁波 2</text>
+  <text class="t-m" x="10" y="310">假设键的哈希把杭州分给 r1，南京、苏州分给 r2，宁波分给 r3。</text>
+  <text class="t-m" x="10" y="330">不管「杭州」出现在哪个分片里，它都只会进 r1。每个 reduce 写一个输出文件。</text>
+</svg>
+<figcaption>本站画的示意图，城市和订单是编的。蓝色粗线是「杭州」走的路。reduce 任务的个数由写作业的人定，和 map 任务数无关。</figcaption>
+</figure>
+<p>MapReduce 把这套 map、洗牌、reduce 做成固定的一步，复杂的计算就串成好几个作业，每个作业的输出写回分布式文件系统，下一个作业再读。数据流引擎（Spark、Flink）把整条工作流当成一个作业：只在真需要的地方排序，中间结果尽量放在内存或本地盘，下游不用等上游整个跑完。读 §3.2 时，留意它为此在容错上换了什么办法（§2.3 的末尾已经提了一句）。</p>
+
+<h3>用排序做连接：reducer 一次只看一个键</h3>
+<p>两张大表连接，比如几十亿条订单要按商家 ID 连上商家资料，拿到商家所在的城市。逐条订单去查商家表，就是几十亿次网络请求。洗牌给了另一条路：两张表各用一个 mapper，都把商家 ID 当键吐出来，订单那边的值是金额，商家那边的值是城市。洗牌之后，同一个商家的资料和它的全部订单到了同一个 reducer，还可以让框架把商家那条排在最前面（二次排序）。reducer 先记下城市，再把后面每条订单配上城市写出去，内存里任何时候只有一个商家的资料。下一个作业再按城市洗牌，就能算每个城市的订单额。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 270" role="img" aria-label="排序归并连接：订单和商家资料两张表都按商家 ID 洗牌，负责 s07 的 reducer 先收到商家资料（城市是苏州），再收到 s07 的三条订单，依次输出带城市的订单">
+  <defs><marker id="a11c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="18">订单（很大）</text>
+  <rect class="box" x="10" y="28" width="170" height="112" rx="6"/>
+  <text class="t-mono" x="22" y="48">o1 s07 金额 18</text>
+  <text class="t-mono" x="22" y="68">o2 s03 金额 40</text>
+  <text class="t-mono" x="22" y="88">o3 s07 金额 25</text>
+  <text class="t-mono" x="22" y="108">o4 s03 金额 12</text>
+  <text class="t-mono" x="22" y="128">o5 s07 金额 32</text>
+  <text class="t-b" x="10" y="172">商家资料（也很大）</text>
+  <rect class="box" x="10" y="182" width="170" height="52" rx="6"/>
+  <text class="t-mono" x="22" y="202">s03 城市 杭州</text>
+  <text class="t-mono" x="22" y="222">s07 城市 苏州</text>
+  <path class="ln" d="M180 84 L238 120 M180 208 L238 140" marker-end="url(#a11c)"/>
+  <rect class="b-warn" x="240" y="104" width="120" height="52" rx="6"/>
+  <text x="300" y="126" text-anchor="middle">按商家 ID</text>
+  <text x="300" y="146" text-anchor="middle">洗牌 + 二次排序</text>
+  <path class="ln" d="M360 130 H386" marker-end="url(#a11c)"/>
+  <text class="t-b" x="390" y="18">负责 s07 的 reducer 依次收到</text>
+  <rect class="b-a" x="390" y="28" width="240" height="30" rx="5"/>
+  <text x="402" y="48">① s07 的商家资料：苏州</text>
+  <rect class="box" x="390" y="64" width="240" height="30" rx="5"/>
+  <text x="402" y="84">② o1 金额 18 → 输出 苏州 18</text>
+  <rect class="box" x="390" y="100" width="240" height="30" rx="5"/>
+  <text x="402" y="120">③ o3 金额 25 → 输出 苏州 25</text>
+  <rect class="box" x="390" y="136" width="240" height="30" rx="5"/>
+  <text x="402" y="156">④ o5 金额 32 → 输出 苏州 32</text>
+  <rect class="f-soft" x="390" y="180" width="240" height="30" rx="5"/>
+  <text class="t-m" x="402" y="200">s03 由另一个 reducer 照样处理</text>
+  <text class="t-m" x="390" y="232">内存里只记着「s07 在苏州」这一条</text>
+  <text class="t-m" x="390" y="252">不用发一次网络请求去查商家表</text>
+</svg>
+<figcaption>本站画的示意图，表和数据是编的。资料那条先到，靠的是二次排序；没有它，reducer 就得先把订单攒在内存里等资料。</figcaption>
+</figure>
+
+<figure class="fig narrow"><img src="../assets/img/11-collator.jpg" alt="博物馆里一台灰色的 IBM 077 卡片校对机，上方有两个进卡口，侧面是几个出卡格" loading="lazy">
+<figcaption>IBM 077 卡片校对机（collator）。它有两个进卡口，能把两叠都已排好序的卡片一趟合成一叠有序的，这就是归并。§1.3 的段归并、§3.3 的 reduce 拉取后的归并、§3.4 的排序归并连接，做的都是这一步。<span class="src">Tekniska museet，CC BY 3.0，维基共享资源</span></figcaption></figure>
+
+<h3>这一章点名的系统</h3>
+<div class="sys">
+  <div><b>HDFS</b><span class="k">分布式文件系统</span> Hadoop 的文件系统，默认块大小 128 MB；元数据由 NameNode 管，块存在各台机器的 DataNode 上。</div>
+  <div><b>Amazon S3</b><span class="k">对象存储</span> 它的 API 被 MinIO、Cloudflare R2 等许多存储系统采用，支持 S3 的批处理系统都能用它们。</div>
+  <div><b>YARN</b><span class="k">作业编排</span> Hadoop 的资源管理和调度；每个节点上跑 NodeManager，集群状态存在 ZooKeeper 里。</div>
+  <div><b>Kubernetes</b><span class="k">作业编排</span> 每个节点上跑 kubelet，集群状态存在 etcd 里；应用自己的调度逻辑叫 operator。</div>
+  <div><b>Spark</b><span class="k">数据流引擎</span> 中间数据放在内存里（放不下就溢写到本地盘），记住它是怎么算出来的，丢了就重算。</div>
+  <div><b>Flink</b><span class="k">数据流引擎</span> 和 Spark 同类，容错靠定期给各个任务做检查点（快照）。</div>
+  <div><b>Airflow、Dagster、Prefect</b><span class="k">工作流调度器</span> 管理作业之间的依赖：上游都成功了，才启动下游。</div>
+  <div><b>Ray</b><span class="k">批处理框架</span> 书里说它为机器学习和大模型的数据处理而建，OpenAI 在 ChatGPT 的训练过程中用到它。</div>
+  <div><b>Venice</b><span class="k">派生数据存储</span> 书里的例子：既能整份替换批处理算出的数据集，也能按行增量更新。</div>
+</div>
+
+<div class="table-wrap"><table class="terms">
+  <tr><th>英文</th><th>中文</th><th>一句话</th></tr>
+  <tr><td>batch processing</td><td><a class="term" href="../glossary.html#g-batch-processing">批处理</a></td><td>读一批只读的输入，从头生成输出，按吞吐量衡量（§0）。</td></tr>
+  <tr><td>online system</td><td>在线系统</td><td>收到请求尽快给出响应的系统，按响应时间衡量（§0）。</td></tr>
+  <tr><td>human fault tolerance</td><td>对人为错误的容错</td><td>代码写错了也能恢复：修好代码重跑，或切回旧输出（§0）。</td></tr>
+  <tr><td>working set</td><td>工作集</td><td>一个作业需要随机访问的那部分内存（§1.3）。</td></tr>
+  <tr><td>distributed filesystem (DFS)</td><td>分布式文件系统</td><td>文件切成大块，分散复制到多台机器上（§2.1）。</td></tr>
+  <tr><td>object store</td><td>对象存储</td><td>按键整个读写不可变的对象，没有真正的目录（§2.2）。</td></tr>
+  <tr><td>job orchestrator</td><td>作业编排器</td><td>集群上的「内核」：决定任务在哪台机器上跑、分多少资源（§2.3）。</td></tr>
+  <tr><td>gang scheduling</td><td>成组调度</td><td>一个作业要的资源凑齐了，才让它的任务一起开跑（§2.3）。</td></tr>
+  <tr><td>preemption</td><td>抢占</td><td>调度器杀掉正在跑的任务，把资源让给更要紧的（§2.3）。</td></tr>
+  <tr><td>workflow</td><td>工作流</td><td>批处理里指作业组成的有向无环图（DAG），上游的输出是下游的输入（§2.3）。</td></tr>
+  <tr><td>MapReduce</td><td><a class="term" href="../glossary.html#g-mapreduce">MapReduce</a></td><td>只写 mapper 和 reducer 两个函数，中间的排序由框架做（§3.1）。</td></tr>
+  <tr><td>dataflow engine</td><td><a class="term" href="../glossary.html#g-dataflow-engine">数据流引擎</a></td><td>把整条工作流当一个作业来执行的引擎，如 Spark、Flink（§3.2）。</td></tr>
+  <tr><td>shuffle</td><td><a class="term" href="../glossary.html#g-shuffle">洗牌</a></td><td>分布式排序：按键把数据分给下游任务，并排好序（§3.3）。</td></tr>
+  <tr><td>sort-merge join</td><td>排序归并连接</td><td>两边按连接键排序后归并，在 reducer 里完成连接（§3.4）。</td></tr>
+  <tr><td>secondary sort</td><td>二次排序</td><td>同一个键之下，再规定值的先后，比如资料在前、事件按时间（§3.4）。</td></tr>
+</table></div>
+
+<h2>动手：模拟器</h2>
+<p>先猜：48 条订单里将近一半属于同一个商家（分布选「一个热键」）。reduce 任务从 2 个加到 6 个，reduce 阶段的用时能缩短到原来的几分之一？换成「均匀」分布再猜一次。猜好了，点「跑完」，再拖滑杆验证。书里这一章没有专门讲倾斜，它的道理在第 7 章 §3.3；这里看的是它在洗牌里的样子。</p>
+<div class="sim" id="sim-11">
+  <div class="sim-head"><span class="tag">模拟器</span><h3>洗牌：按键分组与数据倾斜</h3><p class="desc">三个 map 任务各读 16 条订单，键是商家 ID（s01–s12）。单步看订单怎么按键的哈希分桶、排序、被各个 reduce 拉走归并；再看哪个 reduce 拖慢了整个作业。</p></div>
+  <div class="sim-body">
+    <div class="controls">
+      <button data-a="next">下一步</button>
+      <button data-a="all">跑完</button>
+      <button data-a="reset">重置</button>
+      <button data-a="reseed">换一批数据</button>
+      <span class="sep"></span>
+      <label>reduce 任务数 <input data-r="R" type="range" min="2" max="6" value="4"><span data-r="Rv">4</span></label>
+      <label>键的分布 <select data-r="dist"><option value="u">均匀</option><option value="z">长尾</option><option value="h">一个热键</option></select></label>
+      <label><input data-r="salt" type="checkbox"> 拆开最热的键</label>
+    </div>
+    <div class="stage" data-r="stage"></div>
+    <div class="narrate" data-r="say">点「下一步」，从 map 读输入开始。</div>
+    <div class="stats" data-r="stats"></div>
+  </div>
+</div>
+<ol class="qs">
+  <li>选「一个热键」，点「跑完」，把 reduce 任务数从 2 拖到 6，记下「最忙的 reduce」每次是多少。它最低能降到多少？为什么降不到平均值？</li>
+  <li>换成「均匀」，把 reduce 任务数拖到 5，再点「换一批数据」几次。没有热键时，各个 reduce 的条数也不一样多，甚至有一个一条都没分到，原因在哪？</li>
+  <li>回到「一个热键」，勾上「拆开最热的键」（第 7 章 §3.3 讲的加随机后缀）。最忙的 reduce 降了多少？多出来的第二轮在做什么？如果两个子键碰巧落到同一个 reduce 上，又会怎样？</li>
+</ol>
+
+<h2>词与短语</h2>
+<p class="lede">词条按在书里出现的顺序排，按节分组；读一节之前先把这一节的过一遍，读的时候就不用停。斜体小字是原句里连续的几个词，在电子书里搜它就能找到那一句。标着「每个字都认识」的，是字面意思会把你带偏的。行话（compaction、quorum 这类）不在这里，在上面的术语表里。</p>
+
+<h3 class="sec-head" id="s0">§0 <span class="first">Much of this book so far…</span></h3>
+<div class="entry trap"><div class="en">from scratch</div><div class="loc" data-p="6">… generated from scratch every time the job …</div><div class="zh">从零开始、整个重新</div><div class="note">每次运行都整份重算，不在上一次的输出上改。</div></div>
+<div class="entry"><div class="en">minimizing irreversibility</div><div class="loc" data-p="9">… This principle of minimizing irreversibility is …</div><div class="zh">尽量少做无法挽回的事</div></div>
+<div class="entry trap"><div class="en">present challenges</div><div class="loc" data-p="12">… it also presents challenges.</div><div class="zh">带来难题</div><div class="note">present 当动词是「造成、带来」，不是「展示」。</div></div>
+<div class="entry trap"><div class="en">quite a bit like</div><div class="loc" data-p="14">… looks quite a bit like a batch …</div><div class="zh">很像</div><div class="note">quite a bit 是「相当多」，不是「有一点」。</div></div>
+<div class="entry"><div class="en">building block</div><div class="loc" data-p="14">… a useful building block for building …</div><div class="zh">基本构件</div></div>
+<div class="entry trap"><div class="en">commodity hardware</div><div class="loc" data-p="16">… achieved on commodity hardware, but now …</div><div class="zh">普通的通用硬件</div><div class="note">commodity 在这里是「大路货」：随处买得到、不是专门定制的机器，便宜但更容易坏。</div></div>
+<div class="entry"><div class="en">largely obsolete</div><div class="loc" data-p="16">… now it is largely obsolete and …</div><div class="zh">基本过时了</div></div>
+<div class="entry"><div class="en">ubiquitous</div><div class="loc" data-p="18">… Cloud computing has grown ubiquitous.</div><div class="zh">无处不在</div></div>
+<div class="entry trap"><div class="en">blur the line between</div><div class="loc" data-p="18">… are blurring the line between data warehouses …</div><div class="zh">让两者的界线变得模糊</div><div class="note">这一章反复出现：批处理和数仓、在线和离线，界线都不那么清楚了。</div></div>
+<div class="entry"><div class="en">build an intuition</div><div class="loc" data-p="19">… To build an intuition of what …</div><div class="zh">建立直观的感觉</div></div>
+
+<h3 class="sec-head" id="s1">§1 <span class="first">Batch Processing with Unix Tools</span></h3>
+<div class="entry trap"><div class="en">contrived</div><div class="loc" data-p="25">… log parsing might seem contrived, it’s …</div><div class="zh">（例子）刻意编出来的、不自然的</div><div class="note">作者先替你说出怀疑：分析日志像是教科书里硬凑的例子，其实不然。</div></div>
+<div class="entry"><div class="en">a driving force behind</div><div class="loc" data-p="25">… it was a driving force behind …</div><div class="zh">背后的推动力</div></div>
+
+<h3 class="sec-head" id="s1.1">§1.1 <span class="first">Simple Log Analysis</span></h3>
+<div class="entry trap"><div class="en">pretty reports</div><div class="loc" data-p="26">… produce pretty reports about your website …</div><div class="zh">好看的报表</div><div class="note">pretty 在这里是形容词「漂亮的」，不是副词「相当」。</div></div>
+<div class="entry"><div class="en">for the sake of exercise</div><div class="loc" data-p="26">… for the sake of exercise, let’s …</div><div class="zh">权当练习</div></div>
+<div class="entry"><div class="en">obscure</div><div class="loc" data-p="36">… looks a bit obscure if you’re …</div><div class="zh">晦涩、难懂</div></div>
+<div class="entry trap"><div class="en">in a matter of seconds</div><div class="loc" data-p="36">… in a matter of seconds, and …</div><div class="zh">几秒之内</div><div class="note">a matter of 加时间，强调「只需要这么点」，和「问题、事情」无关。</div></div>
+<div class="entry trap"><div class="en">perform surprisingly well</div><div class="loc" data-p="37">… and they perform surprisingly well.</div><div class="zh">性能好得出人意料</div><div class="note">perform 说的是跑得快不快，不是「表演」。</div></div>
+
+<h3 class="sec-head" id="s1.2">§1.2 <span class="first">Chain of Commands Versus Custom Program</span></h3>
+<div class="entry trap"><div class="en">a matter of taste</div><div class="loc" data-p="45">… is in part a matter of taste.</div><div class="zh">看个人口味</div><div class="note">意思是没有对错。紧接着的 however 才是重点：执行方式差别很大。</div></div>
+<div class="entry"><div class="en">superficial</div><div class="loc" data-p="45">… the superficial syntactic differences between the …</div><div class="zh">表面的</div></div>
+
+<h3 class="sec-head" id="s1.3">§1.3 <span class="first">Sorting Versus In-Memory Aggregation</span></h3>
+<div class="entry trap"><div class="en">spill to disk</div><div class="loc" data-p="49">… by spilling to disk and automatically …</div><div class="zh">（内存放不下时）溢写到磁盘</div><div class="note">spill 本义是液体洒出来；数据处理里指内存装满后把一部分写到盘上，后面 Spark 那段还会出现。</div></div>
+<div class="entry trap"><div class="en">that’s where … come in</div><div class="loc" data-p="50">… that’s where distributed batch processing frameworks …</div><div class="zh">这正是……派上用场的地方</div><div class="note">come in 是「登场、起作用」，用来引出下一节的主角。</div></div>
+
+<h3 class="sec-head" id="s2.1">§2.1 <span class="first">Distributed Filesystems</span></h3>
+<div class="entry trap"><div class="en">speak directly to</div><div class="loc" data-p="57">… block device drivers speak directly to the disk …</div><div class="zh">直接和……打交道</div><div class="note">speak to 在技术英文里常指「通过某种协议和它通信」。</div></div>
+<div class="entry trap"><div class="en">appliance</div><div class="loc" data-p="68">… a centralized storage appliance, often using …</div><div class="zh">（软硬件一体的）专用设备</div><div class="note">不是「家电」：指厂商整机卖给你的存储设备，和用普通机器拼出来的相对。</div></div>
+
+<h3 class="sec-head" id="s2.2">§2.2 <span class="first">Object Stores</span></h3>
+<div class="entry"><div class="en">care must be taken</div><div class="loc" data-p="71">… Care must be taken when adopting …</div><div class="zh">要当心</div></div>
+<div class="entry"><div class="en">requisite</div><div class="loc" data-p="71">… to implement the requisite APIs.</div><div class="zh">必需的</div><div class="note">整句的意思：看起来实现了该有的接口，行为也可能不一样。</div></div>
+
+<h3 class="sec-head" id="s2.3">§2.3 <span class="first">Distributed Job Orchestration</span></h3>
+<div class="entry"><div class="en">competing needs</div><div class="loc" data-p="99">… among jobs with competing needs.</div><div class="zh">互相争抢的需求</div></div>
+<div class="entry trap"><div class="en">hold back</div><div class="loc" data-p="103">… or hold some back in anticipation …</div><div class="zh">留着先不给</div><div class="note">in anticipation of 是「预备着……」：为一个可能来、也可能不来的作业预留资源。</div></div>
+<div class="entry trap"><div class="en">sit idle</div><div class="loc" data-p="104">… nodes will sit idle.</div><div class="zh">闲着没事干</div><div class="note">sit 在这里不是「坐」，是「处于某种状态」。</div></div>
+<div class="entry"><div class="en">intractable</div><div class="loc" data-p="106">… optimal solution seems intractable.</div><div class="zh">（计算上）难以解决的</div></div>
+<div class="entry trap"><div class="en">prohibitively</div><div class="loc" data-p="106">… it is prohibitively slow to calculate …</div><div class="zh">（慢、贵）到没法用的程度</div><div class="note">prohibit 是「禁止」；prohibitively expensive / slow 是贵到、慢到实际上做不了。</div></div>
+<div class="entry trap"><div class="en">all but</div><div class="loc" data-p="106">… for all but the smallest examples.</div><div class="zh">除了……之外的全部</div><div class="note">只有最小的例子能算出最优解。all but 也常表示「几乎」，要看后面接什么。</div></div>
+<div class="entry"><div class="en">run the risk of</div><div class="loc" data-p="118">… they run the risk of being preempted …</div><div class="zh">冒着……的风险</div></div>
+<div class="entry"><div class="en">at the granularity of</div><div class="loc" data-p="120">… at the granularity of an individual task.</div><div class="zh">以……为单位</div></div>
+
+<h3 class="sec-head" id="s3">§3 <span class="first">Batch Processing Models</span></h3>
+<div class="entry"><div class="en">turn our attention to</div><div class="loc" data-p="123">… Let’s now turn our attention to …</div><div class="zh">把注意力转到</div></div>
+
+<h3 class="sec-head" id="s3.1">§3.1 <span class="first">MapReduce</span></h3>
+<div class="entry trap"><div class="en">make their way into</div><div class="loc" data-p="137">… they have made their way into mainstream …</div><div class="zh">（慢慢）进入了、传到了</div><div class="note">make one’s way 是「一路走到」，强调经过了一段时间。</div></div>
+<div class="entry"><div class="en">laborious</div><div class="loc" data-p="139">… APIs is actually quite laborious</div><div class="zh">费力、繁重</div></div>
+
+<h3 class="sec-head" id="s3.2">§3.2 <span class="first">Dataflow Engines</span></h3>
+<div class="entry"><div class="en">need not</div><div class="loc" data-p="141">… operators need not take the strict roles …</div><div class="zh">不必</div></div>
+<div class="entry trap"><div class="en">in a row</div><div class="loc" data-p="145">… several operators in a row that …</div><div class="zh">接连的、一个挨一个的</div><div class="note">不是「在一行里」：几个算子前后相接。</div></div>
+
+<h3 class="sec-head" id="s3.3">§3.3 <span class="first">Shuffling Data</span></h3>
+<div class="entry trap"><div class="en">shuffle a deck of cards</div><div class="loc" data-p="152">… When you shuffle a deck of cards …</div><div class="zh">洗一副扑克牌</div><div class="note">作者特意提醒：批处理的 shuffle 结果是排好序的，一点也不随机，和洗牌的本义相反。</div></div>
+
+<h3 class="sec-head" id="s3.4">§3.4 <span class="first">Joins and Grouping</span></h3>
+<div class="entry trap"><div class="en">in one go</div><div class="loc" data-p="168">… particular user ID in one go, …</div><div class="zh">一口气、一次处理完</div></div>
+<div class="entry"><div class="en">at any one time</div><div class="loc" data-p="168">… in memory at any one time, …</div><div class="zh">在任何一个时刻</div></div>
+
+<h3 class="sec-head" id="s3.5">§3.5 <span class="first">Query Languages</span></h3>
+<div class="entry trap"><div class="en">more or less</div><div class="loc" data-p="171">… considered more or less solved, …</div><div class="zh">差不多、基本上</div></div>
+<div class="entry trap"><div class="en">lingua franca</div><div class="loc" data-p="172">… SQL as the lingua franca for batch …</div><div class="zh">通用语言</div><div class="note">原指母语不同的人之间用来交流的共同语言。</div></div>
+<div class="entry"><div class="en">a natural fit</div><div class="loc" data-p="172">… It’s a natural fit, because legacy …</div><div class="zh">天然合适</div></div>
+<div class="entry trap"><div class="en">the task at hand</div><div class="loc" data-p="174">… suitable for the task at hand.</div><div class="zh">手头这件事</div><div class="note">at hand 是「眼前的、手边的」。</div></div>
+<div class="entry trap"><div class="en">struggle with</div><div class="loc" data-p="181">… Cloud data warehouses struggle with certain workloads …</div><div class="zh">应付不好</div><div class="note">不是「和……搏斗」：做得吃力、效果不好。</div></div>
+<div class="entry trap"><div class="en">come down to</div><div class="loc" data-p="182">… often comes down to factors such as …</div><div class="zh">归根到底取决于</div></div>
+<div class="entry trap"><div class="en">get by with</div><div class="loc" data-p="182">… often get by with just one.</div><div class="zh">（只用……）也能凑合过去</div></div>
+
+<h3 class="sec-head" id="s3.6">§3.6 <span class="first">DataFrames</span></h3>
+<div class="entry trap"><div class="en">performance surprises</div><div class="loc" data-p="184">… lead to performance surprises when migrating …</div><div class="zh">性能上的意外（通常是变慢）</div><div class="note">往轻里说：surprise 在这里几乎都不是好事。</div></div>
+
+<h3 class="sec-head" id="s4">§4 <span class="first">Batch Use Cases</span></h3>
+<div class="entry"><div class="en">data freshness</div><div class="loc" data-p="187">… and data freshness isn’t important.</div><div class="zh">数据的新鲜程度（离产生有多久）</div></div>
+
+<h3 class="sec-head" id="s4.1">§4.1 <span class="first">Extract–Transform–Load</span></h3>
+<div class="entry trap"><div class="en">embarrassingly parallel</div><div class="loc" data-p="194">… involves “embarrassingly parallel” workloads.</div><div class="zh">（容易到）不用费心就能并行的</div><div class="note">行话，不是「尴尬」：任务之间完全不用互相通信，拆开各算各的就行。</div></div>
+<div class="entry trap"><div class="en">go awry</div><div class="loc" data-p="196">… fix when things go awry.</div><div class="zh">出岔子</div></div>
+<div class="entry trap"><div class="en">invaluable</div><div class="loc" data-p="196">… This feature is invaluable when debugging …</div><div class="zh">极其宝贵</div><div class="note">in- 在这里不是否定：贵重到没法估价。</div></div>
+
+<h3 class="sec-head" id="s4.2">§4.2 <span class="first">Analytics</span></h3>
+<div class="entry trap"><div class="en">roll up into</div><div class="loc" data-p="202">… Data is rolled up into OLAP cubes …</div><div class="zh">汇总成</div><div class="note">roll up 在分析里是「往上汇总」，和 drill down（往下钻到明细）相对。</div></div>
+
+<h3 class="sec-head" id="s4.3">§4.3 <span class="first">Machine Learning</span></h3>
+<div class="entry"><div class="en">make heavy use of</div><div class="loc" data-p="214">… also make heavy use of graph processing …</div><div class="zh">大量使用</div></div>
+<div class="entry"><div class="en">purpose-built</div><div class="loc" data-p="220">… are purpose-built for such workloads.</div><div class="zh">专门为此而建的</div></div>
+
+<h3 class="sec-head" id="s4.4">§4.4 <span class="first">Serving Derived Data</span></h3>
+<div class="entry"><div class="en">be tempted to</div><div class="loc" data-p="223">… You might be tempted to use …</div><div class="zh">很想（这么做）</div><div class="note">作者先说出那个顺手的做法，紧接着说它是个坏主意。</div></div>
+<div class="entry trap"><div class="en">throttle</div><div class="loc" data-p="229">… Downstream systems can throttle their read rate …</div><div class="zh">（主动）限速</div><div class="note">本义是节流阀、掐住喉咙；这里是下游自己控制读得多快。</div></div>
+<div class="entry trap"><div class="en">demilitarized zone</div><div class="loc" data-p="231">… in a so-called demilitarized zone (DMZ) …</div><div class="zh">隔离区（网络里的 DMZ）</div><div class="note">本义是对峙各方约定不得驻军的非军事区；网络里指夹在两个网络中间、两边都只能有限访问的一段。</div></div>
+<div class="entry trap"><div class="en">bootstrap</div><div class="loc" data-p="233">… more common when bootstrapping databases is …</div><div class="zh">（从零）建起、初始化</div><div class="note">bootstrap 本义是靴子后面的提带；技术里指从无到有把一个东西建起来，开机的 boot 就是 bootstrap 的缩写。</div></div>
+
+<div class="gate"><b>到这里先停下，去读原书</b><p>下面是读完再看的：你的预测对不对、几道换成你来选的判断题、值得细读的句子和理解检查。先看了，读书时就只是在找答案。</p></div>
+
+<h2>读完：回到你的预测</h2>
+<div class="payoff" data-bet="11-a"><div class="mine"></div>
+<p>答案是第二项（§1.3）。哈希表里每个商品只占一行：商品 ID 加一个计数器。工作集只取决于不同的商品有多少个，同一个商品卖出一百万单也还是一行。20 万行远远放得进 8 GB，明细是 50 GB 还是 500 GB 都无所谓，读明细本身是顺序的。书里也是这么说的：工作集够小，哈希表在笔记本上就能跑。排序的优势要等工作集比内存还大时才出现，那时它可以在内存里排好一块、写盘、再归并。想一想：如果统计的是「每个用户 × 每个商品」各买了几单，不同的组合有几十亿个，答案会变吗？</p></div>
+<div class="payoff" data-bet="11-b"><div class="mine"></div>
+<p>答案是第四项（§2.2）。对象存储没有真正的目录，斜杠只是键的一部分；改名靠把对象复制到新键再删掉旧的，不是原子的，「改一个目录名」就得逐个改里面的每个对象。所以 2 万个对象要做 2 万次复制和删除，中途来读 out/ 的人可能只看到一部分（这一句是本站从「非原子」推出来的，书里没有展开）。本地文件系统的 rename 才是原子的。这也是 §4.4 要专门讲「全有或全无」的原因之一。想一想：如果改成让下游去读一个「清单」对象，里面列着这次输出的全部文件，作业最后才写这个清单，问题解决了吗？</p></div>
+
+<h2>判断题：换成你来选</h2>
+<p class="lede">场景都是本站编的。先选，再看解释；解释里写了对应的节号，拿不准就回原书看那一节。</p>
+<p class="quiz-score"></p>
+<div class="mcq" data-answer="1"><div class="q">最后那个任务为什么这么慢？<span class="sec">§3.3</span></div>
+  <p class="ctx">场景：一个每晚跑的作业，按广告主 ID 汇总当天的点击。reduce 阶段有 200 个任务，199 个三分钟内结束，最后一个跑了两个多小时。换了机器重跑，还是它最慢。</p>
+  <div class="opts"><button>那台机器的磁盘有问题，换个节点就好</button><button>有一个广告主的点击特别多，同一个键全落在这一个 reduce 任务上</button><button>reduce 任务太少，再加到 400 个就能均匀</button><button>map 的输出没有排序，这个 reduce 要自己排</button></div>
+  <div class="explain"><p>洗牌保证同一个键进同一个 reduce 任务（§3.3），所以一个超大的键只能由一个任务处理。换了机器还慢，说明不是机器的问题；加 reduce 任务数只能把别的键分得更散，分不开这一个键。map 输出总是排好序再交给 reduce 的。办法在第 7 章 §3.3：给热键加随机后缀拆成几份，再加一轮把部分结果合起来。</p></div></div>
+<div class="mcq" data-answer="2"><div class="q">推荐结果怎么送到线上？<span class="sec">§4.4</span></div>
+  <p class="ctx">场景：一个批处理作业每晚给 5000 万用户算推荐列表，有 300 个 reduce 任务。线上 App 从一个键值存储里读推荐。要求：任何时刻用户看到的都是同一晚算出来的完整结果。</p>
+  <div class="opts"><button>每个 reduce 任务用数据库客户端，把自己那部分逐条写进线上的键值存储</button><button>每个 reduce 任务跑完就把它那部分批量写进线上存储，让新结果尽早可见</button><button>在作业里把整份数据建成键值存储能直接导入的文件，跑完后批量导入，一次切换到新版本</button><button>把结果写进 Kafka，线上存储收到一条就立即让它可查</button></div>
+  <div class="explain"><p>在作业里建好整份数据库文件再批量导入，切换版本是一次完成的，正合「同一晚的完整结果」的要求（书里提到 RocksDB 可以导入批处理生成的 SST 文件）。逐条写既慢又可能压垮线上库，任务重试还会写重复。按任务分批写、收到一条就可查，都会让用户看到一半新一半旧。走 Kafka 本身可以，但要等作业发出「完成」通知后再让数据可见。</p></div></div>
+<div class="mcq" data-answer="0"><div class="q">用便宜的可抢占实例跑，框架最好怎么处理失败？<span class="sec">§2.3</span></div>
+  <p class="ctx">场景：公司把不赶时间的报表作业放到云上的低价可抢占实例上跑。每个作业几百个任务，一晚上总有十几个任务被回收机器杀掉。</p>
+  <div class="opts"><button>任务之间互不依赖，被杀的任务删掉半截输出，换台机器单独重跑</button><button>只要有任务失败，就把整个作业从头再跑一遍</button><button>任务把输出直接写进最终目录，重跑时从断点接着写</button><button>关掉重试，失败的任务留空，第二天手工补</button></div>
+  <div class="explain"><p>批处理每次从头生成输出，所以任务失败可以只重跑这一个任务，前提是任务彼此独立、输出先写在别处，成功后才算数（§2.3）。整个作业重跑在抢占频繁时可能永远跑不完；直接写最终目录会让下游读到半截或重复的数据；留空就失去了「全有或全无」。</p></div></div>
+<div class="mcq" data-answer="3"><div class="q">从 MapReduce 迁到 Spark，主要省在哪？<span class="sec">§3.2</span></div>
+  <p class="ctx">场景：一条流水线由 6 个 MapReduce 作业串成，每个作业的结果写回 HDFS（三副本），下一个再读出来。每天要跑四个小时。团队打算用 Spark 重写同样的逻辑。</p>
+  <div class="opts"><button>Spark 不用排序，所以洗牌的开销没了</button><button>主要是 SQL 比 Java 好写，机器上的开销差不多</button><button>Spark 把数据放在对象存储上，比 HDFS 快</button><button>中间结果不再写成 DFS 上的多副本文件，相邻算子能合成一个任务，下游不必等上游全部结束</button></div>
+  <div class="explain"><p>数据流引擎把整条工作流当一个作业，中间状态放内存或本地盘，不用每步复制三份写 DFS；不改分片的算子合并成一个任务；算子的输入一准备好就能开始（§3.2）。排序没有消失，只是只在需要的地方做（连接、分组仍要洗牌）。代价是中间数据丢了要重算，Spark 为此记住每份中间数据是怎么算出来的。</p></div></div>
+
+<h2>和本站其他书对照</h2>
+<div class="who">
+  <div><b>rename 的原子性</b><span class="en">OSTEP 第 39 章</span>本地文件系统的 rename 在崩溃时也是原子的，「写临时文件、刷盘、再改名」是原子更新文件的标准做法。§2.2 说对象存储恰恰没有这个保证，读那一节前先看看本地的这套做法依赖的是什么。<a class="go" href="/ostep/chapters/39-files-dirs.html">去那一页 →</a></div>
+  <div><b>公平和效率</b><span class="en">OSTEP 第 9 章</span>一台机器上的比例份额调度，讲的是让每个作业按份额分到 CPU。§2.3 的集群调度器也在公平和利用率之间权衡，只是它分的是整个集群的核、内存和 GPU，书里点名的 DRF 就是多种资源下的公平分配。<a class="go" href="/ostep/chapters/09-lottery.html">去那一页 →</a></div>
+</div>
+
+<h2>值得停下来的句子</h2>
+<blockquote class="quote">if you deploy buggy code that writes bad data to the database, rolling back the code will do nothing to fix that data.<cite>— §0。本站译：如果你上线了往数据库里写坏数据的 bug，回滚代码对修复那些数据毫无作用。</cite></blockquote>
+<p>这句话说的是在线数据库，衬出来的是批处理最大的好处。批处理不改输入，只从头生成输出，坏数据可以整份扔掉重算。全章后面很多设计都靠这一点：任务失败了只重跑一个任务，工作流的上下游靠文件交接，§4.4 一再强调别从任务里直接写外部系统，因为那样就把这个好处丢了。</p>
+<blockquote class="quote">MapReduce was a step forward … but now it is largely obsolete and no longer used at Google.<cite>— §0。本站译：MapReduce 曾是一大进步……但现在它基本已经过时，Google 自己也不再用了。</cite></blockquote>
+<p>值得停下来，是因为这一章仍然花了不少篇幅讲 MapReduce。作者的理由在 §3：后来的数据流引擎和云数仓都继承了它的思路，尤其是洗牌。读的时候把 MapReduce 当成一个讲清机制的最小模型，而不是一个推荐你去用的系统。</p>
+
+<h2>检查一下理解</h2>
+<details class="check"><summary>1.（§0）为什么批处理作业上线了 bug，比在线数据库好补救？</summary><p>输入是只读的，输出每次从头生成。修好代码重跑，或者切回保留着的旧输出就行；在线数据库里被 bug 写坏的数据，回滚代码也改不回来。</p></details>
+<details class="check"><summary>2.（§1.3）命令行里的 sort 怎么处理比内存还大的数据？</summary><p>在内存里排好一块就写到盘上成为一个段，最后把几个有序段归并成一个大的有序文件；还会自动用上多个 CPU 核。所以瓶颈通常是从磁盘读输入的速度。</p></details>
+<details class="check"><summary>3.（§2.1）分布式文件系统的块为什么比本地文件系统大那么多？</summary><p>块大，要记的元数据就少，在拍字节级的数据上差别很大；而且相对于读一整块的时间，定位到块的开销显得很小。</p></details>
+<details class="check"><summary>4.（§2.3）成组调度会带来什么问题？不用它又会怎样？</summary><p>为凑齐一个作业要的全部资源而预留，节点会闲着，几个作业都在预留时还可能死锁。如果干等资源空出来，别的作业会先抢走，这个作业可能饿死；抢占别人的任务又浪费了已做的工作。</p></details>
+<details class="check"><summary>5.（§3.1）mapper 为什么不在两条记录之间保留状态？</summary><p>每次调用只依赖传进来的那条记录，框架才能把调用分给很多台机器并行跑，任务失败时也能在别的机器上用同样的输入重来，结果不变。</p></details>
+<details class="check"><summary>6.（§3.3）map 的输出是怎么到 reduce 那里的？</summary><p>每个 mapper 给每个 reducer 在本地盘写一个文件，按键的哈希决定写进哪个，文件内排好序；map 结束后，各个 reducer 把属于自己的文件拉过来归并，同一个键就挨在一起了。</p></details>
+<details class="check"><summary>7.（§3.4）排序归并连接里，reducer 的内存要装多少东西？</summary><p>一次只处理一个键，二次排序让维度那条记录先到，所以内存里只要记住当前这一个用户（或商家）的那条记录，不需要向外部发请求。</p></details>
+<details class="check"><summary>8.（§4.4）把结果写进流系统，解决不了哪个问题？怎么补？</summary><p>解决不了「全有或全无」：消费方可能先看到一部分结果。作业结束后要给下游发「完成」通知，消费方在收到通知之前不让这批数据被查到，像读已提交下看不到未提交的事务。</p></details>
+<p>用一句话说这一章（写给一个没读过的朋友）：</p>
+<textarea class="note" data-key="11-oneline" placeholder="比如：……"></textarea>
+
+<h2>精彩回顾</h2>
+<p class="recall-line"><b>一句话：</b>批处理读只读的输入、从头算出输出，靠洗牌这个分布式排序把同一个键的数据送到一起，出了错就重跑。</p>
+<div class="recall">
+  <div class="item"><b>回滚代码救不了数据</b><p>在线库被 bug 写坏的数据收不回来；批处理的输出扔掉重算就行。全章的容错都站在这一点上。</p><span class="sec">§0</span></div>
+  <div class="item"><b>工作集看的是键数</b><p>同一个键出现一百万次，在哈希表里也只占一行。工作集比内存大时，排序加归并才开始占上风。</p><span class="sec">§1.3</span></div>
+  <div class="item"><b>改名就是复制加删除</b><p>对象存储没有真目录，也没有原子改名；改一个「目录名」要把里面每个对象挨个搬一遍。</p><span class="sec">§2.2</span></div>
+  <div class="item"><b>最优调度算不出来</b><p>书里的例子：两个作业各要 100 核、集群只有 160 核，就已经左右为难；规模一大，求最优解是 NP 难的，只能靠启发式。</p><span class="sec">§2.3</span></div>
+  <div class="item"><b>洗牌一点也不乱</b><p>批处理的 shuffle 结果是排好序的。每个 map 给每个 reduce 写一个有序文件，reduce 拉来归并。</p><span class="sec">§3.3</span></div>
+  <div class="item"><b>资料先到，订单随后</b><p>二次排序让 reducer 先拿到维度那条记录，再一条条配上事件；内存里只放一条，也不发网络请求。</p><span class="sec">§3.4</span></div>
+  <div class="item"><b>别从任务里直接写线上库</b><p>逐条写太慢，并发写会压垮线上库，失败重试还会留下半截和重复。改走流，或建好整份库再批量导入。</p><span class="sec">§4.4</span></div>
+</div>
+
+</main>
+<script>
+(() => {
+  const root = document.getElementById("sim-11"), h = window.DD.h;
+  const $ = (r) => root.querySelector(`[data-r="${r}"]`);
+  const KEYS = Array.from({ length: 12 }, (_, i) => `s${String(i + 1).padStart(2, "0")}`);
+  const M = 3, PER = 16;
+  const STEPS = ["map 读输入", "按键的哈希分桶", "每个文件内排序", "洗牌：拉取并归并", "reduce：逐键调用"];
+  // 带种子的伪随机数：「重置」之后同样的操作得到同样的结果
+  const rng = (seed) => () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  // 键的哈希：FNV-1a 再打散一下，决定一条记录进哪个 reduce
+  const hash = (s) => {
+    let x = 2166136261;
+    for (const c of s) { x ^= c.charCodeAt(0); x = Math.imul(x, 16777619); }
+    x ^= x >>> 16; x = Math.imul(x, 0x85ebca6b); x ^= x >>> 13; x = Math.imul(x, 0xc2b2ae35); x ^= x >>> 16;
+    return x >>> 0;
+  };
+  const WEIGHTS = { u: KEYS.map(() => 1), z: KEYS.map((_, i) => 1 / (i + 1)), h: KEYS.map((_, i) => (i === 0 ? 11 : 1)) };
+  let S;
+  function gen() {
+    const w = WEIGHTS[$("dist").value], tot = w.reduce((a, b) => a + b, 0);
+    const rnd = rng(S.seed * 7919 + "uzh".indexOf($("dist").value));
+    S.maps = [];
+    for (let m = 0; m < M; m++) {
+      const recs = [];
+      for (let i = 0; i < PER; i++) {
+        let x = rnd() * tot, k = 0;
+        while (k < KEYS.length - 1 && x >= w[k]) { x -= w[k]; k++; }
+        recs.push(KEYS[k]);
+      }
+      S.maps.push(recs);
+    }
+  }
+  function reset(seed) { S = { seed, phase: 0 }; gen(); }
+  const R = () => Number($("R").value);
+  const salted = () => $("salt").checked;
+  // 由当前的数据和参数算出整个洗牌过程
+  function compute() {
+    const r = R(), cnt = {};
+    for (const recs of S.maps) for (const k of recs) cnt[k] = (cnt[k] || 0) + 1;
+    const hot = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a] || (a < b ? -1 : 1))[0];
+    let turn = 0;
+    // 每个 map 的输出：给每个 reduce 一个文件。拆热键时，热键的记录轮流加上后缀 -0、-1……
+    const files = S.maps.map((recs) => {
+      const fs = Array.from({ length: r }, () => []);
+      for (const k of recs) {
+        const key = salted() && k === hot ? `${k}-${turn++ % r}` : k;
+        fs[hash(key) % r].push(key);
+      }
+      return fs;
+    });
+    const red = Array.from({ length: r }, (_, j) => {
+      const items = [];
+      files.forEach((fs, m) => fs[j].forEach((key) => items.push({ key, m })));
+      items.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : a.m - b.m));
+      const groups = [];
+      for (const it of items) { const g = groups[groups.length - 1]; if (g && g.key === it.key) g.n++; else groups.push({ key: it.key, n: 1 }); }
+      return { items, groups };
+    });
+    const loads = red.map((x) => x.items.length);
+    const max = Math.max(...loads), busiest = loads.indexOf(max), avg = (M * PER) / r;
+    const parts = salted() ? new Set(red.flatMap((x) => x.groups.map((g) => g.key)).filter((k) => k.startsWith(hot + "-"))).size : 0;
+    return { r, cnt, hot, files, red, loads, max, busiest, avg, parts, time: max + parts };
+  }
+  const isHot = (key, C) => key === C.hot || key.startsWith(C.hot + "-");
+  const lane = (label, kids) => h("div", { class: "lane" }, h("span", { class: "lbl" }, label), ...kids);
+  const empty = () => h("span", { class: "pill" }, "空");
+  function narrate(C) {
+    const p = S.phase, avg = C.avg.toFixed(1);
+    if (S.over) return "已经跑完了。拖动滑杆、换分布或勾选拆热键，画面会直接重算；点「重置」从头看。";
+    if (p === 0) return `三个 map 任务各读一个输入分片，每个 16 条订单，键是商家 ID。最多的是 ${C.hot}，共 ${C.cnt[C.hot]} 条（蓝框）。点「下一步」看 map 怎么输出。`;
+    if (p === 1) return `每条记录算 hash(键) mod ${C.r}，写进给那个 reduce 的本地文件。同一个键在哪个 map 里都会进同一个编号的文件。` + (salted() ? ` 拆热键打开了：${C.hot} 轮流加上后缀 -0 到 -${C.r - 1}，变成 ${C.r} 个不同的键，各自哈希。` : "");
+    if (p === 2) return "map 在写这些文件的同时把每个文件排好序（内存里排序、写成段、再合并，和 LSM 树一样）。排序是为了下一步能直接归并。";
+    if (p === 3) return `每个 reduce 从三个 map 各拉一个文件，归并成一个有序序列，同一个键挨在一起了。框的颜色表示来自哪个 map。洗牌一共搬了 ${M * PER} 条记录。`;
+    let t = `reduce ${C.busiest + 1} 处理了 ${C.max} 条，平均每个 ${avg} 条。各个 reduce 并行跑，整个阶段要等最慢的那个：${salted() ? "第一轮" : ""}用时 ${C.max} 个单位。`;
+    if (salted()) {
+      const spread = C.red.filter((x) => x.groups.some((g) => g.key.startsWith(C.hot + "-"))).length;
+      t += ` ${C.hot} 被拆成 ${C.parts} 个子键，分到了 ${spread} 个 reduce 上；最后还要再跑一小轮，把 ${C.parts} 个部分结果加起来（多 ${C.parts} 个单位，合计 ${C.time}）。` + (spread < C.parts ? " 有的子键哈希到了同一个 reduce，拆得没那么匀。" : "");
+    }
+    else if (C.cnt[C.hot] > C.avg) t += ` 光 ${C.hot} 一个键就有 ${C.cnt[C.hot]} 条，它只能进一个 reduce，reduce 再多也分不开它。`;
+    else if (C.max > C.avg * 1.3) t += " 没有哪个键特别大，是键太少、哈希分得不匀：有的 reduce 分到的键多。";
+    return t;
+  }
+  function render() {
+    $("Rv").textContent = R();
+    const C = compute(), p = S.phase, st = $("stage");
+    st.textContent = "";
+    st.append(h("div", { class: "step" }, `第 ${p + 1} 步 / 5：${STEPS[p]}`));
+    const cell = (key, extra) => h("span", { class: `cell ${extra || ""}` }, key);
+    if (p === 0) S.maps.forEach((recs, m) => st.append(lane(`map ${m + 1} 读分片 ${m + 1}`, recs.map((k) => cell(k, k === C.hot ? "on" : "")))));
+    if (p === 1 || p === 2) C.files.forEach((fs, m) => st.append(lane(`map ${m + 1} 的输出`, fs.map((f, j) => {
+      const keys = p === 2 ? [...f].sort() : f;
+      return h("span", { class: "grp" }, h("span", { class: "pill" }, `给 r${j + 1}`), ...(keys.length ? keys.map((k) => cell(k, isHot(k, C) ? "on" : "")) : [empty()]));
+    }))));
+    if (p === 3) C.red.forEach((x, j) => st.append(lane(`reduce ${j + 1}`, x.items.length ? x.items.map((it) => cell(it.key, `k${it.m + 1}`)) : [empty()])));
+    if (p === 4) {
+      C.red.forEach((x, j) => st.append(lane(`reduce ${j + 1}`, x.groups.length ? x.groups.map((g) => cell(`${g.key}：${g.n} 单`, isHot(g.key, C) && g.n > C.avg ? "bad" : "")) : [empty()])));
+      if (salted()) st.append(lane("第二轮合并", [cell(`${C.hot}：${C.cnt[C.hot]} 单`, "ok"), h("span", { class: "pill" }, `${C.parts} 个部分结果相加`)]));
+    }
+    if (p >= 3) {
+      st.append(h("div", { class: "step" }, "各个 reduce 要处理的条数"));
+      C.loads.forEach((n, j) => {
+        const bar = h("span", { class: `bar ${n === C.max && C.max > C.avg * 1.3 ? "hot" : ""}` });
+        bar.style.width = `${Math.max(2, Math.round((n / (M * PER)) * 240))}px`;
+        st.append(lane(`reduce ${j + 1}`, [bar, h("span", { class: "pill" }, `${n} 条`)]));
+      });
+    }
+    $("say").textContent = narrate(C);
+    const done = p >= 3, stats = $("stats");
+    stats.textContent = "";
+    for (const [v, l] of [[M * PER, "订单总数"], [C.r, "reduce 任务数"], [done ? C.max : "—", "最忙的 reduce（条）"], [done ? C.avg.toFixed(1) : "—", "平均每个（条）"], [done ? `${(C.max / C.avg).toFixed(2)} 倍` : "—", "最忙 ÷ 平均"], [p === 4 ? C.time : "—", "reduce 阶段用时"]])
+      stats.append(h("div", { class: "stat" }, h("div", { class: "v" }, String(v)), h("div", { class: "l" }, l)));
+  }
+  const act = {
+    next: () => { if (S.phase < 4) S.phase++; else S.over = true; },
+    all: () => { S.phase = 4; },
+    reset: () => reset(1),
+    reseed: () => reset(S.seed + 1),
+  };
+  root.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-a]"); if (!b) return;
+    S.over = false; act[b.dataset.a](); render();
+  });
+  $("R").addEventListener("input", () => { S.over = false; render(); });
+  $("salt").addEventListener("change", () => { S.over = false; render(); });
+  $("dist").addEventListener("change", () => { S.over = false; gen(); render(); });
+  reset(1); render();
+})();
+</script>
+</body>
+</html>

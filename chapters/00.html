@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>开读之前 · DDIA 导读</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/chapters.js"></script>
+<script src="../assets/sections.js"></script>
+<script src="../assets/dd.js"></script>
+</head>
+<body data-chapter="0">
+<main>
+
+<h2>这本书讲什么</h2>
+<div class="gist"><p>数据库有几百种，该用哪个？作者在序言里的回答是「看情况」，这本书就是在讲看什么情况。它不教某一个产品怎么用，而是把各种数据系统背后的原理摊开：数据怎么存、怎么在机器之间复制和切分、网络和时钟出问题时怎么办、一份数据怎么派生出索引、缓存和分析表。每一处都讲取舍：这样做省了什么，代价付在哪里。作者说工具变得快，原理变得慢，懂了原理就能看清每个工具的位置。</p></div>
+<p>写给谁（§2）：要为系统做架构决定的工程师和技术负责人，尤其是后端；想弄清手上系统底层原理的数据工程师、云平台工程师；准备系统设计面试的人；以及不满足于流行词、想知道大网站幕后怎么运转的人。作者假设你做过 Web 应用，熟悉关系数据库和 SQL，大致懂 TCP 和 HTTP；用什么编程语言无所谓。</p>
+<p>全书约一千条参考文献（致谢），每章末尾一份（§4），多数能免费在网上读到。作者在 GitHub 上维护着一份最新的链接（ept/ddia2-references）。读纸书的话，想追某篇论文，按标题搜就行。</p>
+
+<h2>全书地图</h2>
+<p>第二版不分部分，本站按内容把十四章分成五块。箭头是「后面的要用到前面的」：第 6 到 10 章前后接得最紧，第 10 章几乎每一节都在回收第 6、8、9 章留下的问题。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 440" role="img" aria-label="全书地图：五块从上到下排列，地基（第 1、2 章）、一台机器上的数据（第 3 到 5 章）、分布到多台机器（第 6 到 10 章）、派生数据（第 11 到 13 章）、做正确的事（第 14 章）">
+  <defs><marker id="a0" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="36">地基</text>
+  <text class="t-m" x="10" y="54">取舍与需求</text>
+  <rect class="b-a" x="110" y="14" width="96" height="44" rx="8"/><text x="158" y="41" text-anchor="middle">1 取舍</text>
+  <rect class="b-a" x="214" y="14" width="96" height="44" rx="8"/><text x="262" y="41" text-anchor="middle">2 需求</text>
+  <path class="ln" d="M262 58 V90" marker-end="url(#a0)"/>
+  <text class="t-b" x="10" y="122">一台机器</text>
+  <text class="t-m" x="10" y="140">存储与编码</text>
+  <rect class="box" x="110" y="100" width="96" height="44" rx="8"/><text x="158" y="127" text-anchor="middle">3 数据模型</text>
+  <rect class="box" x="214" y="100" width="96" height="44" rx="8"/><text x="262" y="127" text-anchor="middle">4 存储引擎</text>
+  <rect class="box" x="318" y="100" width="96" height="44" rx="8"/><text x="366" y="127" text-anchor="middle">5 编码</text>
+  <path class="ln" d="M262 144 V176" marker-end="url(#a0)"/>
+  <text class="t-b" x="10" y="208">多台机器</text>
+  <text class="t-m" x="10" y="226">分布式数据</text>
+  <rect class="b-warn" x="110" y="186" width="96" height="44" rx="8"/><text x="158" y="213" text-anchor="middle">6 复制</text>
+  <rect class="b-warn" x="214" y="186" width="96" height="44" rx="8"/><text x="262" y="213" text-anchor="middle">7 分片</text>
+  <rect class="b-warn" x="318" y="186" width="96" height="44" rx="8"/><text x="366" y="213" text-anchor="middle">8 事务</text>
+  <rect class="b-warn" x="422" y="186" width="96" height="44" rx="8"/><text x="470" y="213" text-anchor="middle">9 麻烦</text>
+  <rect class="b-warn" x="526" y="186" width="104" height="44" rx="8"/><text x="578" y="213" text-anchor="middle">10 共识</text>
+  <path class="ln-d" d="M158 230 C 200 262, 540 262, 578 232" marker-end="url(#a0)"/>
+  <path class="ln-d" d="M366 230 C 420 252, 530 252, 570 232"/>
+  <path class="ln-d" d="M470 230 C 500 246, 540 246, 562 232"/>
+  <text class="t-m" x="330" y="282">第 10 章收拢 6、8、9 章的问题</text>
+  <path class="ln" d="M262 262 V292" marker-end="url(#a0)"/>
+  <text class="t-b" x="10" y="324">派生数据</text>
+  <text class="t-m" x="10" y="342">一份变多份</text>
+  <rect class="b-ok" x="110" y="302" width="96" height="44" rx="8"/><text x="158" y="329" text-anchor="middle">11 批处理</text>
+  <rect class="b-ok" x="214" y="302" width="96" height="44" rx="8"/><text x="262" y="329" text-anchor="middle">12 流处理</text>
+  <rect class="b-ok" x="318" y="302" width="122" height="44" rx="8"/><text x="379" y="329" text-anchor="middle">13 数据流的哲学</text>
+  <path class="ln" d="M262 346 V378" marker-end="url(#a0)"/>
+  <text class="t-b" x="10" y="410">做正确的事</text>
+  <text class="t-m" x="10" y="428">伦理与法律</text>
+  <rect class="box" x="214" y="388" width="96" height="44" rx="8"/><text x="262" y="415" text-anchor="middle">14 伦理</text>
+  <text class="t-m" x="460" y="324">第 4 章的日志、索引、</text>
+  <text class="t-m" x="460" y="342">物化视图在这里重新登场</text>
+</svg>
+<figcaption>本站画的全书结构，分块和章的简称都是本站起的。</figcaption>
+</figure>
+
+<h2>怎么读</h2>
+<ul>
+  <li><strong>以英文为主，读不顺就翻译本。</strong>每章页面的分节地图照抄了原书的小标题，下面一行是本站自己译的中文意思，可以照着在译本里找。本站的中文术语是自己译的，可能和译本不同，按英文对。</li>
+  <li><strong>一章分几次读完。</strong>全书约 20 万词，每章 6 千到 2.2 万词。每章的分节地图把一章分成三到六次「坐下」，每次两三千到五千多词，在意思转折处断开。</li>
+  <li><strong>读之前先猜，读完再对。</strong>每章页面的上半部分是预测、骨架、分节地图、用中文和示意图过一遍的机制、模拟器和词条；读完再看下半部分的答案、判断题和理解检查。</li>
+  <li><strong>第 6 到 10 章最好连着读。</strong>复制、分片、事务、故障、共识，前一章埋下的问题后一章接着讲，隔太久回来会接不上。</li>
+</ul>
+<p>本站的建议（不是作者的）：只有一点时间、想先抓住最常用的部分，可以按 1 → 2 → 4 → 6 → 8 读，其余的需要时再回来；偏数据工程方向的，第 3、4、5、11、12、13 章是重心；对分布式系统最好奇的，从第 6 章读到第 10 章。不管哪条路线，第 1 章都值得先读：它定下了全书看问题的方法。</p>
+
+<h2>第二版新在哪</h2>
+<div class="tip"><p>对照译本时认准第二版。第一版（2017）的译本还在流通，章节结构不同：第一版共 12 章，第 1 章讲可靠性、可扩展性和可维护性；第二版 14 章，第 1 章是数据系统架构里的取舍。</p></div>
+<p>第一版是 2017 年出的，Martin Kleppmann 一个人写；第二版加入了 Chris Riccomini 做合著者（§3、致谢）。按序言的说法，目标和范围没变，全书都改过一遍，大约多了 60 页。两个最大的变化是 AI 热潮和「云原生」的架构：</p>
+<ul>
+  <li><strong>为 AI 服务的数据系统</strong>：向量索引（语义检索用）、DataFrame（准备训练数据用）、为大批训练数据做准备的批处理。</li>
+  <li><strong>云原生</strong>：数据系统建在对象存储上而不是本地磁盘上，这个想法贯穿全书。</li>
+  <li><strong>新加的话题</strong>：同步引擎和本地优先软件、工作流引擎和持久化执行、形式化方法和随机测试、GraphQL，以及欧盟《通用数据保护条例》（GDPR）等法律背景。</li>
+  <li><strong>拿掉和重写的</strong>：MapReduce 基本过时，批处理一章重写了；一致性与共识（现在的第 10 章）几乎整章重写；章的编号也变了。</li>
+</ul>
+
+<h2>分节地图</h2>
+<p class="lede">序言约 1900 词，一次读完。后四节（排版约定、出版社的在线学习平台、联系方式、致谢）可以跳过。</p>
+<ol class="secmap">
+  <li data-sec="1"><b>Preface<span class="w">约 400 词</span></b><span class="cn">序言</span><span class="what">「看情况」和这本书的取向：讲原理、讲取舍，兼顾学术和工程。</span></li>
+  <li data-sec="2"><b>Who Should Read This Book?<span class="w">约 300 词</span></b><span class="cn">谁应该读这本书</span><span class="what">几类读者，和作者对你已有知识的假设。</span></li>
+  <li data-sec="3"><b>What’s New in the Second Edition?<span class="w">约 300 词</span></b><span class="cn">第二版有什么新东西</span><span class="what">AI 和云原生两条线，新增和删掉的话题。</span></li>
+  <li data-sec="4"><b>References and Further Reading<span class="w">约 200 词</span></b><span class="cn">参考文献和延伸阅读</span><span class="what">一千来条文献怎么用，论文去哪找免费的。</span></li>
+</ol>
+
+<h2>词与短语</h2>
+<p class="lede">词条按在书里出现的顺序排，按节分组。斜体小字是原句里连续的几个词，在电子书里搜它就能找到那一句。标着「每个字都认识」的，是字面意思会把你带偏的。</p>
+
+<h3 class="sec-head" id="s1">§1 <span class="first">Preface</span></h3>
+<div class="entry trap"><div class="en">it depends</div><div class="loc" data-p="1">… short answer is, “It depends.” …</div><div class="zh">看情况</div><div class="note">全书的口头禅。作者用整本书来回答「看什么情况」。</div></div>
+<div class="entry trap"><div class="en">tease apart</div><div class="loc" data-p="4">… tease apart their key algorithms …</div><div class="zh">（把纠缠在一起的东西）细细拆开</div><div class="note">tease 本义是梳理羊毛、亚麻的纤维，「逗弄」是后来才有的意思；tease apart 是一点点理清。</div></div>
+<div class="entry trap"><div class="en">be in a great position to</div><div class="loc" data-p="5">… you will be in a great position …</div><div class="zh">很有条件去（做某事）</div><div class="note">position 不是「位置、职位」，是「处境」。</div></div>
+<div class="entry trap"><div class="en">new and shiny</div><div class="loc" data-p="6">… to things that are new and shiny …</div><div class="zh">新潮光鲜的东西</div><div class="note">略带贬义：只因为新而被追捧。</div></div>
+<div class="entry"><div class="en">look down on</div><div class="loc" data-p="6">… to look down on ideas that …</div><div class="zh">看不起</div></div>
+
+<h3 class="sec-head" id="s2">§2 <span class="first">Who Should Read This Book?</span></h3>
+<div class="entry"><div class="en">behind the scenes</div><div class="loc" data-p="12">… goes on behind the scenes at …</div><div class="zh">在幕后</div></div>
+<div class="entry trap"><div class="en">dig deeper than buzzwords</div><div class="loc" data-p="12">… dig deeper than buzzwords to gain …</div><div class="zh">不满足于流行词，往深里挖</div><div class="note">buzzword 是听着时髦、意思含糊的流行词。</div></div>
+
+<h3 class="sec-head" id="s3">§3 <span class="first">What’s New in the Second Edition?</span></h3>
+<div class="entry"><div class="en">per se</div><div class="loc" data-p="15">… is not about AI per se, …</div><div class="zh">本身</div><div class="note">拉丁语，「就其本身而言」。</div></div>
+<div class="entry trap"><div class="en">woven in</div><div class="loc" data-p="15">… have been woven in throughout the book.</div><div class="zh">融进（全书各处）</div><div class="note">weave 是编织：不是单独加一章，而是分散编进各章。</div></div>
+<div class="entry trap"><div class="en">take away</div><div class="loc" data-p="16">… also taken a few things away—for …</div><div class="zh">删掉、拿掉</div></div>
+<div class="entry trap"><div class="en">a light edit</div><div class="loc" data-p="17">… required only a light edit, …</div><div class="zh">小改</div><div class="note">light 是「轻微的」，不是「光」。</div></div>
+
+<h3 class="sec-head" id="s4">§4 <span class="first">References and Further Reading</span></h3>
+<div class="entry trap"><div class="en">engineering folklore</div><div class="loc" data-p="18">… mailing lists, or engineering folklore.</div><div class="zh">工程师之间口耳相传的经验</div><div class="note">folklore 本义民间传说：没写成文档、靠老人带新人传下来的那些。</div></div>
+
+<h2>本站怎么用</h2>
+<ul>
+  <li><strong>每章一页，中间有一道「先停下，去读原书」。</strong>上面是读之前看的，下面是读完再看的。</li>
+  <li><strong>分节地图可以打勾。</strong>读完一节勾一节，首页的目录会显示读到哪了。章末有「这一章读完了」的按钮。</li>
+  <li><strong>写下的东西只存在你的浏览器里。</strong>预测、边读边填的答案、一句话总结都会自动保存。想在几台设备之间同步，在教程站首页开启同步。</li>
+  <li><strong>词条可以「记下」。</strong>记下的词汇总在本书首页，也进入几本伴读共用的跨书词本，按间隔复习。</li>
+  <li><strong>模拟器</strong>在第 2、4、5、6、7、8、9、10、11、12 章，都只用浏览器、不联网。先按页面上的提示猜一猜，再动手验证。</li>
+  <li><strong>全书术语</strong>和<strong>全书回顾</strong>在首页底部：术语每个只讲一次，回顾把各章的「精彩回顾」汇在一页。</li>
+</ul>
+
+</main>
+</body>
+</html>

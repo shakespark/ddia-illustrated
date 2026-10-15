@@ -1,0 +1,4 @@
+# 原书 epub 和提取的文本：版权归原作者与出版方，绝不入库、不部署
+/source/
+node_modules/
+__pycache__/

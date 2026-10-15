@@ -1,0 +1,24 @@
+- `04-hdd-inside.jpg` — File:Seagate ST33232A hard disk inner view.jpg — Eric Gaba ( Sting - fr:Sting ) This image was created with CombineZP by 11 ( It  — CC BY-SA 3.0 — https://commons.wikimedia.org/wiki/File%3ASeagate_ST33232A_hard_disk_inner_view.jpg
+- `01-server-room.jpg` — File:BalticServers data center.jpg — BalticServers.com — CC BY-SA 3.0 — https://commons.wikimedia.org/wiki/File%3ABalticServers_data_center.jpg
+- `01-pleiades.jpg` — File:Pleiades two row.jpg — NASA Ames Research Center — Public domain — https://commons.wikimedia.org/wiki/File%3APleiades_two_row.jpg
+- `03-card-catalog.jpg` — File:Schlagwortkatalog.jpg — Dr. Marcus Gossler — CC BY-SA 3.0 — https://commons.wikimedia.org/wiki/File%3ASchlagwortkatalog.jpg
+- `05-rosetta-stone.jpg` — File:Rosetta Stone.JPG — Hans Hillewaert — CC BY-SA 4.0 — https://commons.wikimedia.org/wiki/File%3ARosetta_Stone.JPG
+- `14-coalbrookdale.jpg` — File:Philipp Jakob Loutherbourg d. J. 002.jpg — Philip James de Loutherbourg — Public domain — https://commons.wikimedia.org/wiki/File%3APhilipp_Jakob_Loutherbourg_d._J._002.jpg
+- `14-schneier.jpg` — File:Bruce Schneier at CoPS2013-IMG 9174.jpg — Rama — CC BY-SA 2.0 fr — https://commons.wikimedia.org/wiki/File%3ABruce_Schneier_at_CoPS2013-IMG_9174.jpg
+- `02-datacenter.jpg` — File:Cern datacenter.jpg — Hugovanmeijeren — CC BY-SA 3.0 — https://commons.wikimedia.org/wiki/File%3ACern_datacenter.jpg
+- `11-card-sorter.jpg` — File:IBM 080 Card Sorter.jpg — Pargon — CC BY 2.0 — https://commons.wikimedia.org/wiki/File%3AIBM_080_Card_Sorter.jpg
+- `06-tape-library.jpg` — File:ADIC Scalar 100 tape library.jpg — Aaron Kuhn from Hatfield, PA — CC BY-SA 2.0 — https://commons.wikimedia.org/wiki/File%3AADIC_Scalar_100_tape_library.jpg
+- `07-hopper-univac.jpg` — File:Grace Hopper and UNIVAC.jpg — 作者不详 — CC BY 2.0 — https://commons.wikimedia.org/wiki/File%3AGrace_Hopper_and_UNIVAC.jpg
+- `11-collator.jpg` — File:IBM 077 collator (1).jpg — Tekniska museet — CC BY 3.0 — https://commons.wikimedia.org/wiki/File%3AIBM_077_collator_%281%29.jpg
+- `13-mixed-gauge.jpg` — File:Broad Gauge mixed gauge track, Didcot Railway Centre, Oxfordshire.jpg — Rosser1954 — CC BY-SA 4.0 — https://commons.wikimedia.org/wiki/File%3ABroad_Gauge_mixed_gauge_track%2C_Didcot_Railway_Centre%2C_Oxfordshire.jpg
+- `07-cern-racks.jpg` — File:Cern datacenter.jpg — Hugovanmeijeren — CC BY-SA 3.0 — https://commons.wikimedia.org/wiki/File%3ACern_datacenter.jpg
+- `09-quartz-oscillator.jpg` — File:Crystal oscillator internals.JPG — Marcin Andrzejewski — CC BY-SA 3.0 — https://commons.wikimedia.org/wiki/File%3ACrystal_oscillator_internals.JPG
+- `13-visicalc.jpg` — File:Visicalc.png — User:Gortu — Public domain — https://commons.wikimedia.org/wiki/File%3AVisicalc.png
+- `09-switch-rack.jpg` — File:19-inch rackmount Ethernet switches and patch panels.jpg — Dsimic — CC BY-SA 4.0 — https://commons.wikimedia.org/wiki/File%3A19-inch_rackmount_Ethernet_switches_and_patch_panels.jpg
+- `10-chronometer.jpg` — File:Charles Frodsham marine chronometer, no. 1842.jpg — Charles Frodsham — CC BY-SA 4.0 — https://commons.wikimedia.org/wiki/File%3ACharles_Frodsham_marine_chronometer%2C_no._1842.jpg
+- `09-ntp-gps-server.jpg` — File:Compact Stratum 1 NTP time server hardware, October 2020.jpg — Steven Baltakatei Sandoval — CC BY-SA 4.0 — https://commons.wikimedia.org/wiki/File%3ACompact_Stratum_1_NTP_time_server_hardware%2C_October_2020.jpg
+- `10-lamport.jpg` — File:Leslie Lamport September 2006.jpg — Andrej Bauer — CC BY-SA 2.5 si — https://commons.wikimedia.org/wiki/File%3ALeslie_Lamport_September_2006.jpg
+- `12-ticker.jpg` — File:Thomas Edison stock ticker NMAH-JN2014-3625.jpg — Jaclyn Nash (photographer) — Public domain — https://commons.wikimedia.org/wiki/File%3AThomas_Edison_stock_ticker_NMAH-JN2014-3625.jpg
+- `12-ledger.jpg` — File:Nealon pp131-132 (3301343384).jpg — Deseronto Archives — No restrictions — https://commons.wikimedia.org/wiki/File%3ANealon_pp131-132_%283301343384%29.jpg
+- `08-tape-drives.jpg` — File:IBM 729 tape drives.agr.jpg — ArnoldReinhold — CC BY-SA 3.0 — https://commons.wikimedia.org/wiki/File%3AIBM_729_tape_drives.agr.jpg
+- `08-ssd-inside.jpg` — File:Samsung SSD 860 Pro internal top.jpg — Michael Bemmerl — CC BY 3.0 de — https://commons.wikimedia.org/wiki/File%3ASamsung_SSD_860_Pro_internal_top.jpg

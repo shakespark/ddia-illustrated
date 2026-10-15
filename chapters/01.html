@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 1 章 · 数据系统架构里的取舍 · DDIA 导读</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/chapters.js"></script>
+<script src="../assets/sections.js"></script>
+<script src="../assets/dd.js"></script>
+</head>
+<body data-chapter="1">
+<main>
+
+<h2>这一章在做什么</h2>
+<div class="gist"><p>这一章不讲具体的技术，讲看问题的方法：数据系统里几乎每个大决定都是取舍，没有哪个方案处处更好。作者拿四组对比来练手：业务系统和分析系统要不要分开；用云服务还是自己部署；一台机器够不够，要不要上分布式；公司想要的和数据背后那些人的权利怎么平衡。一路上立下全书要用的词：OLTP、数据仓库、记录系统和派生数据、云原生。读每一组都问：这一边省了什么，代价付在哪。</p></div>
+<figure class="fig"><img src="../assets/img/01-server-room.jpg" alt="一间机房里，金属货架上一层层摆满了塔式服务器，蓝色灯带照亮了机器的正面" loading="lazy">
+<figcaption>BalticServers 公司的一间机房，架子上排满了服务器。这一章的第二组对比就是在问：这样的机器，连同照看它们的人，是自己养，还是交给云厂商（§2）。照片与本书无关。<span class="src">BalticServers.com，CC BY-SA 3.0，维基共享资源</span></figcaption></figure>
+
+<h2>读之前：先预测</h2>
+<p>这是全书的第一章，不讲具体机制，先交代后面十三章都要用的眼光和词汇。第 2 章接着把「到底要什么」说清楚：性能、可靠、可扩展、好维护。这一章立下的业务与分析之分，到第 4 章变成两类截然不同的存储引擎；记录系统和派生数据，是第 11 到 13 章的主线；分布式的麻烦留到第 9 章细讲；法律和伦理在第 14 章展开。</p>
+
+<div class="bet" data-key="01-a">
+  <div class="q">一个分析任务要反复处理几十 GB 的数据。方案甲：一台机器上的一个单线程程序。方案乙：一个总共一百多个 CPU 核的集群，用通用的分布式计算框架。书里怎么说？</div>
+  <div class="opts">
+    <button>集群一定快得多：核数多了一百倍</button>
+    <button>集群更快，只是快不了一百倍，因为节点之间要协调</button>
+    <button>单机有可能明显更快：跨网络搬数据、协调节点的开销，可能吃掉多出来的核</button>
+    <button>差不多：两边的瓶颈都在磁盘上</button>
+    <button>单机更快，因为集群里总有节点出故障，任务要重跑</button>
+  </div>
+  <textarea class="note" data-key="01-a-bet" placeholder="你为什么这么猜？一两句就行"></textarea>
+</div>
+
+<div class="bet" data-key="01-b">
+  <div class="q">一家公司有几位很熟悉 PostgreSQL 运维的工程师，数据库负载全年平稳，要的机器数几乎不变。把数据库从自己的服务器搬到云上的托管服务，花的钱会怎样？</div>
+  <div class="opts">
+    <button>一定更省：云厂商规模大，硬件单价低</button>
+    <button>往往更贵：会运维、负载又可预测时，自己买机器跑通常更便宜</button>
+    <button>差不多：云的价格本来就是按硬件成本定的</button>
+    <button>更省：上了云就不需要运维人员了</button>
+  </div>
+  <textarea class="note" data-key="01-b-bet" placeholder="你为什么这么猜？"></textarea>
+</div>
+
+<div class="crux"><p>同一份数据，有人要它一条条地快速改，有人要它一次扫几千万行；有的团队想什么都自己掌控，有的想全交出去。没有一个方案处处更好，那么面对一个架构决定，该怎么看清它省下了什么、代价付在哪、由谁来付？</p></div>
+<ol class="qs">
+  <li>分析师为什么不直接去查业务数据库？至少找出三条理由。<span class="sec">§1.2</span></li>
+  <li>什么样的数据丢了也不要紧？一份数据算正本还是派生，取决于用的数据库，还是别的什么？<span class="sec">§1.3</span></li>
+  <li>云服务最大的缺点是什么？什么条件下自己部署反而更便宜？<span class="sec">§2.1</span></li>
+  <li>「多加几台机器」在什么情况下反而更慢、更难排查？<span class="sec">§3.1</span></li>
+</ol>
+
+<h2>这一章的骨架</h2>
+<p>这一章是四组「A 对 B」，彼此独立，每一组都是先讲一边的好处，再讲它的代价。容易乱的是前两组：§1 里数据仓库、数据湖、HTAP、记录系统一个接一个出场；§2 在讲完云的利弊之后，插进一大段存算分离和运维的变化。先认准每组的两端，再把这些名词挂上去。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 340" role="img" aria-label="这一章的骨架：同一份数据，不同的人要它做不同的事；下面分成四组对比，业务对分析、云对自建、分布式对单机、生意对用户，每组列出几节内容和各自的代价">
+  <rect class="box" x="170" y="8" width="300" height="36" rx="8"/>
+  <text class="t-b" x="320" y="31" text-anchor="middle">同一份数据，不同的人要它做不同的事</text>
+  <path class="ln" d="M320 44 V60 M83 60 H557 M83 60 V78 M241 60 V78 M399 60 V78 M557 60 V78"/>
+  <rect class="b-a" x="8" y="78" width="150" height="34" rx="6"/>
+  <text class="t-b" x="83" y="100" text-anchor="middle">业务 对 分析 §1</text>
+  <rect class="b-a" x="166" y="78" width="150" height="34" rx="6"/>
+  <text class="t-b" x="241" y="100" text-anchor="middle">云 对 自建 §2</text>
+  <rect class="b-a" x="324" y="78" width="150" height="34" rx="6"/>
+  <text class="t-b" x="399" y="100" text-anchor="middle">分布式 对 单机 §3</text>
+  <rect class="b-a" x="482" y="78" width="150" height="34" rx="6"/>
+  <text class="t-b" x="557" y="100" text-anchor="middle">生意 对 用户 §4</text>
+  <rect class="box" x="8" y="122" width="150" height="32" rx="6"/>
+  <text x="83" y="143" text-anchor="middle">两种访问模式 §1.1</text>
+  <rect class="box" x="8" y="162" width="150" height="32" rx="6"/>
+  <text x="83" y="183" text-anchor="middle">仓库、湖、HTAP §1.2</text>
+  <rect class="box" x="8" y="202" width="150" height="32" rx="6"/>
+  <text x="83" y="223" text-anchor="middle">正本和派生 §1.3</text>
+  <rect class="box" x="166" y="122" width="150" height="32" rx="6"/>
+  <text x="241" y="143" text-anchor="middle">云的利与弊 §2.1</text>
+  <rect class="box" x="166" y="162" width="150" height="32" rx="6"/>
+  <text x="241" y="183" text-anchor="middle">存储计算拆开 §2.2</text>
+  <rect class="box" x="166" y="202" width="150" height="32" rx="6"/>
+  <text x="241" y="223" text-anchor="middle">运维变了样 §2.3</text>
+  <rect class="box" x="324" y="122" width="150" height="32" rx="6"/>
+  <text x="399" y="143" text-anchor="middle">网络带来的麻烦 §3.1</text>
+  <rect class="box" x="324" y="162" width="150" height="32" rx="6"/>
+  <text x="399" y="183" text-anchor="middle">微服务、无服务器 §3.2</text>
+  <rect class="box" x="324" y="202" width="150" height="32" rx="6"/>
+  <text x="399" y="223" text-anchor="middle">云计算对超算 §3.3</text>
+  <rect class="box" x="482" y="122" width="150" height="32" rx="6"/>
+  <text x="557" y="143" text-anchor="middle">隐私法规</text>
+  <rect class="box" x="482" y="162" width="150" height="32" rx="6"/>
+  <text x="557" y="183" text-anchor="middle">删除权 对 只追加</text>
+  <rect class="box" x="482" y="202" width="150" height="32" rx="6"/>
+  <text x="557" y="223" text-anchor="middle">数据最小化</text>
+  <rect class="b-warn" x="8" y="248" width="150" height="32" rx="6"/>
+  <text x="83" y="269" text-anchor="middle">代价：多一条管道</text>
+  <rect class="b-warn" x="166" y="248" width="150" height="32" rx="6"/>
+  <text x="241" y="269" text-anchor="middle">代价：失去控制</text>
+  <rect class="b-warn" x="324" y="248" width="150" height="32" rx="6"/>
+  <text x="399" y="269" text-anchor="middle">代价：网络会失败</text>
+  <rect class="b-warn" x="482" y="248" width="150" height="32" rx="6"/>
+  <text x="557" y="269" text-anchor="middle">代价：存着就有风险</text>
+  <rect class="b-ok" x="8" y="296" width="624" height="34" rx="6"/>
+  <text x="320" y="318" text-anchor="middle">每一组都问：这一边省了什么，代价付在哪，由谁来付</text>
+</svg>
+<figcaption>本站画的全章结构。四组之间没有先后依赖，读累了可以在任何一组的边界停下。橙色那一行是本站的概括，书里每一组列的代价不止一条。</figcaption>
+</figure>
+<p class="lede">边读边填：每行一个问题，读到答案就写一两句。只存在你这台设备的浏览器里，别人看不到。</p>
+<div class="table-wrap"><table class="findit">
+  <tr><th>要找的</th><th>带着这个问题读，找到了就写下来</th></tr>
+  <tr><td>两种访问模式</td><td><p class="q">事务处理和分析，读和写各是什么样子？数据各从哪里来？<span class="sec">§1.1</span></p><input class="note" data-key="01-f1" aria-label="两种访问模式：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>单独的仓库</td><td><p class="q">分析师不直接查业务库，书里给了哪几条理由？<span class="sec">§1.2</span></p><input class="note" data-key="01-f2" aria-label="单独的仓库：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>湖和仓库</td><td><p class="q">数据湖和数据仓库差在哪？谁更需要湖？<span class="sec">§1.2</span></p><input class="note" data-key="01-f3" aria-label="湖和仓库：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>正本还是派生</td><td><p class="q">怎么判断一份数据属于哪一类？由什么决定？<span class="sec">§1.3</span></p><input class="note" data-key="01-f4" aria-label="正本还是派生：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>云的账</td><td><p class="q">什么条件下自建更便宜？什么样的负载最适合上云？<span class="sec">§2.1</span></p><input class="note" data-key="01-f5" aria-label="云的账：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>本地盘</td><td><p class="q">云原生系统为什么不把本地盘当长期存储？虚拟磁盘又有什么问题？<span class="sec">§2.2</span></p><input class="note" data-key="01-f6" aria-label="本地盘：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>微服务的动机</td><td><p class="q">它主要解决的是什么问题？团队很少的公司该不该用？<span class="sec">§3.2</span></p><input class="note" data-key="01-f7" aria-label="微服务的动机：你的答案" placeholder="你的答案"></td></tr>
+</table></div>
+<details class="reveal"><summary>读完了？对照我找到的</summary><ul>
+  <li>两种访问模式：事务处理按键取少量记录、按用户操作逐条增删改；分析扫大量记录算汇总，数据靠批量导入或事件流进来。</li>
+  <li>单独的仓库：数据散在多个系统里拼不起来；适合事务的模式不适合分析；分析查询贵，拖慢线上用户；业务库可能在不让直接访问的网络里。</li>
+  <li>湖和仓库：仓库多是关系模型、用 SQL；湖只存文件，不规定格式和模式，也更便宜。做特征工程、处理文本和图片的数据科学家更需要湖。</li>
+  <li>正本还是派生：派生的数据丢了能从源头重建；算哪一类不看用的是什么数据库，看你在应用里怎么用它。</li>
+  <li>云的账：团队会运维、负载平稳可预测时，自己买机器往往更便宜；负载起伏大（分析查询就是）时云更划算。</li>
+  <li>本地盘：实例坏了或换规格，本地盘就访问不到了；虚拟磁盘每次 I/O 都是一次网络调用，模拟块设备本身也有开销。</li>
+  <li>微服务的动机：主要解决人的问题，让各团队不用彼此协调就能各自推进；团队少的小公司用它，多半是不必要的开销。</li>
+</ul></details>
+
+<h2>分节地图</h2>
+<p class="lede">全章约 1 万词，建议分三次读，每次对应一到两组对比。第一次最长、新名词最多；第二次讲云，书里的例子多是具体的产品名，读起来快；第三次把分布式和法律与社会放在一起，后者篇幅不长。</p>
+<ol class="secmap">
+  <li class="sit">第一次坐下<span>§0–§1.3 · 约 4100 词 · 业务系统和分析系统，数据从哪来、到哪去</span></li>
+  <li data-sec="0"><b>Data is central to much application…<span class="w">约 1000 词</span></b><span class="cn">开篇</span><span class="what">什么叫数据密集型应用，这本书帮你做哪类决定，本章四组对比的清单。方框里解释前端和后端。</span></li>
+  <li data-sec="1"><b>Operational Versus Analytical Systems<span class="w">约 500 词</span></b><span class="cn">业务系统和分析系统</span><span class="what">和数据打交道的几类人，以及全书都会用到的「业务／分析」二分。</span></li>
+  <li data-sec="1.1"><b>Characterizing Transaction Processing and Analytics<span class="w">约 700 词</span></b><span class="cn">事务处理和分析各是什么样</span><span class="what">「事务」一词的来历，点查和扫描汇总两种访问模式，嵌进产品里的实时分析。</span></li>
+  <li data-sec="1.2"><b>Data Warehousing<span class="w">约 1500 词</span></b><span class="cn">数据仓库</span><span class="what">为什么把分析搬到单独的库：ETL、HTAP、数据湖，以及数据怎么流回业务系统。本章最长的一节。</span></li>
+  <li data-sec="1.3"><b>Systems of Record and Derived Data<span class="w">约 500 词</span></b><span class="cn">记录系统和派生数据</span><span class="what">哪份数据是正本，哪些丢了能重建。全书后半部分的伏笔。</span></li>
+  <li class="sit">第二次坐下<span>§2–§2.3 · 约 2900 词 · 云还是自建，云改变了什么</span></li>
+  <li data-sec="2"><b>Cloud Versus Self-Hosting<span class="w">约 300 词</span></b><span class="cn">上云还是自己部署</span><span class="what">买还是自己做：从完全自研到完全外包，中间有好几档。</span></li>
+  <li data-sec="2.1"><b>Pros and Cons of Cloud Services<span class="w">约 800 词</span></b><span class="cn">云服务的利与弊</span><span class="what">什么时候云更省钱，什么时候自建更划算；「失去控制」具体指哪几种情况。</span></li>
+  <li data-sec="2.2"><b>Cloud Native System Architecture<span class="w">约 1100 词</span></b><span class="cn">云原生的系统架构</span><span class="what">在底层云服务上搭高层服务；存储和计算为什么拆开；多租户的好处和难处。</span></li>
+  <li data-sec="2.3"><b>Operations in the Cloud Era<span class="w">约 600 词</span></b><span class="cn">云时代的运维</span><span class="what">运维的目标没变，干的活变了。抓住「容量规划变成了什么」。</span></li>
+  <li class="sit">第三次坐下<span>§3–§5 · 约 3300 词 · 单机还是分布式，再加上法律和社会</span></li>
+  <li data-sec="3"><b>Distributed Versus Single-Node Systems<span class="w">约 500 词</span></b><span class="cn">分布式还是单机</span><span class="what">走向多台机器的九条理由。读的时候分一分：哪些躲不掉，哪些是可选的。</span></li>
+  <li data-sec="3.1"><b>Problems with Distributed Systems<span class="w">约 400 词</span></b><span class="cn">分布式系统的麻烦</span><span class="what">请求会超时，排查难，跨服务的一致性落到应用头上；单机为什么常常够用。</span></li>
+  <li data-sec="3.2"><b>Microservices and Serverless<span class="w">约 700 词</span></b><span class="cn">微服务和无服务器</span><span class="what">拆成服务的好处、代价和它真正解决的问题；无服务器把按量计费带到了代码执行上。</span></li>
+  <li data-sec="3.3"><b>Cloud Computing Versus Supercomputing<span class="w">约 400 词</span></b><span class="cn">云计算和超级计算</span><span class="what">超算在故障处理、信任和网络上，和云走了不同的路。</span></li>
+  <li data-sec="4"><b>Data Systems, Law, and Society<span class="w">约 900 词</span></b><span class="cn">数据系统、法律与社会</span><span class="what">隐私法规怎么伸进系统设计；存数据的成本为什么不只是账单。</span></li>
+  <li data-sec="5"><b>Summary<span class="w">约 400 词</span></b><span class="cn">小结</span><span class="what">全章回顾。先自己回忆一遍四组对比，再读它。</span></li>
+</ol>
+
+<h2>先用中文过一遍</h2>
+<h3>两种用数据的方式：一条条地改，一大片地算</h3>
+<p>拿一个外卖平台来想。用户下单、骑手接单，后端按订单号取出一条记录，改一个状态，再写一行新的；每秒成千上万次，每次只碰几行，要快。周一早上，运营想知道「上个月每个城市的午餐营业额」：一条查询扫过几千万行订单，只用其中两三列，最后得到几十个汇总数字。前一种叫在线事务处理（OLTP），后一种叫分析，书里也提到它的另一个叫法：在线分析处理（OLAP）。</p>
+<p>两种查询都能用 SQL 写，早年也确实跑在同一个库里。后来分开，是因为挤在一起互相伤害：分析的大扫描会拖慢线上用户；一家大企业的业务系统可能有几十上百个，数据各在各的库里，一条查询拼不起来。于是有了数据仓库：把各个业务库的数据抽出来（定期导出，或者持续同步改动），整理成方便分析的样子，导入一个单独的库，这个过程叫 ETL。业务系统里的查询是写死在代码里的那几种，分析师则想到什么查什么，这也是两边的一个区别。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 276" role="img" aria-label="同一张订单表的两种用法：左边业务系统按订单号取出一行改状态；右边分析查询扫过所有行，只读城市和金额两列，汇总成几十个数字">
+  <defs><marker id="m1b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="18">业务系统：一条条地读和改</text>
+  <text class="t-b" x="335" y="18">分析：一大片地算</text>
+  <text class="t-m" x="40" y="40" text-anchor="middle">订单号</text><text class="t-m" x="100" y="40" text-anchor="middle">城市</text><text class="t-m" x="160" y="40" text-anchor="middle">时间</text><text class="t-m" x="220" y="40" text-anchor="middle">金额</text><text class="t-m" x="280" y="40" text-anchor="middle">状态</text>
+  <rect class="box" x="10" y="48" width="300" height="22" rx="3"/>
+  <rect class="box" x="10" y="74" width="300" height="22" rx="3"/>
+  <rect class="box" x="10" y="100" width="300" height="22" rx="3"/>
+  <rect class="b-a" x="10" y="126" width="300" height="22" rx="3"/>
+  <rect class="box" x="10" y="152" width="300" height="22" rx="3"/>
+  <text class="t-mono" x="40" y="63" text-anchor="middle">A1029</text><text class="t-mono" x="100" y="63" text-anchor="middle">杭州</text><text class="t-mono" x="160" y="63" text-anchor="middle">11:58</text><text class="t-mono" x="220" y="63" text-anchor="middle">42</text><text class="t-mono" x="280" y="63" text-anchor="middle">已送达</text>
+  <text class="t-mono" x="40" y="89" text-anchor="middle">A1030</text><text class="t-mono" x="100" y="89" text-anchor="middle">苏州</text><text class="t-mono" x="160" y="89" text-anchor="middle">11:59</text><text class="t-mono" x="220" y="89" text-anchor="middle">28</text><text class="t-mono" x="280" y="89" text-anchor="middle">配送中</text>
+  <text class="t-mono" x="40" y="115" text-anchor="middle">A1031</text><text class="t-mono" x="100" y="115" text-anchor="middle">杭州</text><text class="t-mono" x="160" y="115" text-anchor="middle">12:00</text><text class="t-mono" x="220" y="115" text-anchor="middle">35</text><text class="t-mono" x="280" y="115" text-anchor="middle">已送达</text>
+  <text class="t-mono" x="40" y="141" text-anchor="middle">A1032</text><text class="t-mono" x="100" y="141" text-anchor="middle">宁波</text><text class="t-mono" x="160" y="141" text-anchor="middle">12:01</text><text class="t-mono" x="220" y="141" text-anchor="middle">51</text><text class="t-mono" x="280" y="141" text-anchor="middle">已接单</text>
+  <text class="t-mono" x="40" y="167" text-anchor="middle">A1033</text><text class="t-mono" x="100" y="167" text-anchor="middle">杭州</text><text class="t-mono" x="160" y="167" text-anchor="middle">12:01</text><text class="t-mono" x="220" y="167" text-anchor="middle">19</text><text class="t-mono" x="280" y="167" text-anchor="middle">配送中</text>
+  <text class="t-a" x="10" y="196">按订单号取出这一行，把状态改成「已接单」</text>
+  <text class="t-m" x="10" y="220">每秒成千上万次，每次只碰几行，要快</text>
+  <text class="t-m" x="10" y="240">查询就是代码里写死的那几种</text>
+  <text class="t-m" x="362" y="40" text-anchor="middle">订单号</text><text class="t-m" x="416" y="40" text-anchor="middle">城市</text><text class="t-m" x="470" y="40" text-anchor="middle">时间</text><text class="t-m" x="524" y="40" text-anchor="middle">金额</text><text class="t-m" x="578" y="40" text-anchor="middle">状态</text>
+  <rect class="box" x="335" y="48" width="54" height="126" rx="3"/>
+  <rect class="b-a" x="389" y="48" width="54" height="126" rx="3"/>
+  <rect class="box" x="443" y="48" width="54" height="126" rx="3"/>
+  <rect class="b-a" x="497" y="48" width="54" height="126" rx="3"/>
+  <rect class="box" x="551" y="48" width="54" height="126" rx="3"/>
+  <path class="ln-d" d="M335 74 H605 M335 100 H605 M335 126 H605 M335 152 H605"/>
+  <text class="t-m" x="470" y="192" text-anchor="middle">⋮ 往下还有几千万行</text>
+  <path class="ln-a" d="M470 198 V214" marker-end="url(#m1b)"/>
+  <rect class="b-ok" x="370" y="218" width="200" height="30" rx="5"/>
+  <text x="470" y="238" text-anchor="middle">每个城市一个总额</text>
+  <text class="t-m" x="335" y="264">偶尔跑一次，只用两列，但要扫过每一行</text>
+</svg>
+<figcaption>本站画的示意图，数据是编的。左右是同一张表的两种用法。两种查询挤在一个库里时，右边的一次大扫描就够让左边的用户等上一阵。</figcaption>
+</figure>
+
+<h3>正本和派生：数据从哪来，丢了能不能重建</h3>
+<p>一份数据第一次写进来的地方，叫记录系统（system of record），也叫事实来源：每个事实在这里只记一次，别处和它对不上，以它为准。从它加工出来的东西，缓存、搜索索引、数据仓库里的表、用这些数据训练的模型，都是派生数据。派生数据严格说是冗余的，丢了可以从正本再算一遍。</p>
+<p>冗余并不等于浪费。同一批订单，搜索要按菜名找，看板要按城市汇总，推荐要按用户口味，各要一种摆法，只靠正本哪一种都快不起来。麻烦在于正本一改，派生的那些都得跟着改，而很多数据库默认你只用它一个，不帮你把改动传出去（第 11 章回到这个问题）。还有一点容易想错：一个库是不是正本，不看它是什么数据库，只看它在你的系统里扮演什么角色。</p>
+<p>数据仓库之外还有数据湖：数据科学家要把数据变成训练模型用的特征，要处理评论文本和图片，关系表和 SQL 不顺手。数据湖只放文件，不规定格式和模式，数据保持业务系统产出时的「生」样子，谁用谁加工。分析出来的结果有时还会流回业务系统，比如训练好的推荐模型部署到线上，这叫反向 ETL。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 300" role="img" aria-label="数据的流向：用户下单先写进记录系统；从记录系统派生出缓存、搜索索引、数据仓库、数据湖和推荐模型；推荐模型经反向 ETL 回到面向用户的应用">
+  <defs><marker id="m1a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <rect class="b-ok" x="10" y="128" width="100" height="36" rx="6"/>
+  <text class="t-b" x="60" y="151" text-anchor="middle">用户下单</text>
+  <path class="ln-a" d="M110 146 H146" marker-end="url(#m1a)"/>
+  <rect class="b-a" x="150" y="110" width="180" height="72" rx="8"/>
+  <text class="t-b" x="240" y="138" text-anchor="middle">记录系统：订单库</text>
+  <text class="t-m" x="240" y="162" text-anchor="middle">先写这里，每个事实只记一次</text>
+  <text class="t-m" x="240" y="204" text-anchor="middle">它一改，右边都得跟着改</text>
+  <text class="t-b" x="410" y="16">派生数据：丢了能从左边重建</text>
+  <rect class="box" x="410" y="26" width="220" height="32" rx="6"/>
+  <text x="520" y="47" text-anchor="middle">缓存：热门店铺的菜单</text>
+  <rect class="box" x="410" y="68" width="220" height="32" rx="6"/>
+  <text x="520" y="89" text-anchor="middle">搜索索引：按菜名找店</text>
+  <rect class="box" x="410" y="110" width="220" height="32" rx="6"/>
+  <text x="520" y="131" text-anchor="middle">数据仓库（经 ETL）：按城市汇总</text>
+  <rect class="box" x="410" y="152" width="220" height="32" rx="6"/>
+  <text x="520" y="173" text-anchor="middle">数据湖（经 ETL）：原始文件</text>
+  <rect class="box" x="410" y="194" width="220" height="32" rx="6"/>
+  <text x="520" y="215" text-anchor="middle">推荐模型：用历史订单训练</text>
+  <path class="ln" d="M330 140 L406 42" marker-end="url(#m1a)"/>
+  <path class="ln" d="M330 143 L406 84" marker-end="url(#m1a)"/>
+  <path class="ln" d="M330 146 L406 126" marker-end="url(#m1a)"/>
+  <path class="ln" d="M330 149 L406 168" marker-end="url(#m1a)"/>
+  <path class="ln" d="M330 152 L406 210" marker-end="url(#m1a)"/>
+  <path class="ln-d" d="M520 226 V262 H334" marker-end="url(#m1a)"/>
+  <text class="t-m" x="430" y="254" text-anchor="middle">反向 ETL</text>
+  <rect class="b-ok" x="150" y="246" width="180" height="32" rx="6"/>
+  <text x="240" y="267" text-anchor="middle">应用里的「猜你想吃」</text>
+</svg>
+<figcaption>本站画的示意图。正本只有一份；派生的可以有很多份，每份为一种用法摆好。同一个 PostgreSQL，放在左边的位置是正本，放在右边、内容从别处同步过来，就是派生的。</figcaption>
+</figure>
+
+<h3>存储和计算拆开</h3>
+<p>传统的做法里，一台机器既管存（磁盘）又管算（CPU 和内存）。写进磁盘就当它不会丢，怕坏盘，就用 RAID 在同一台机器上多存几份。到了云上，这个假设站不住了：虚拟机坏了，或者为了应付负载换成更大的规格（搬到另一台物理机上），原来的本地盘就够不着了。所以云原生系统通常把本地盘当临时缓存。</p>
+<p>云厂商也提供能从一台虚拟机卸下、挂到另一台上的虚拟磁盘，传统数据库因此能直接搬上云。但它其实是另一群机器在模仿一块盘，每次读写都是一次网络调用，网络稍一抖动就感觉得到。云原生的数据库换了个思路：把很多值打包成大块，写进对象存储（S3 这类），零碎的小值交给单独的服务；计算节点按需起停，不再和数据绑在一起。代价是数据要经网络搬到计算的地方，这把话题引向了 §3。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 260" role="img" aria-label="对比传统架构和云原生架构：传统的一台机器里同时有 CPU、内存和两块做 RAID 的磁盘；云原生架构里三个计算节点只把本地盘当缓存，数据经网络读写对象存储">
+  <defs><marker id="m1c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="18">传统：一台机器又存又算</text>
+  <rect class="box" x="10" y="30" width="260" height="170" rx="8"/>
+  <rect class="b-a" x="30" y="46" width="220" height="34" rx="6"/>
+  <text x="140" y="68" text-anchor="middle">CPU 和内存</text>
+  <rect class="b-warn" x="30" y="104" width="100" height="50" rx="6"/>
+  <text x="80" y="134" text-anchor="middle">磁盘 1</text>
+  <rect class="b-warn" x="150" y="104" width="100" height="50" rx="6"/>
+  <text x="200" y="134" text-anchor="middle">磁盘 2</text>
+  <text class="t-m" x="140" y="182" text-anchor="middle">RAID：同一份数据写两块盘</text>
+  <text class="t-m" x="10" y="226">坏一块盘不怕；整台机器坏了，</text>
+  <text class="t-m" x="10" y="246">数据也跟着下线</text>
+  <text class="t-b" x="320" y="18">云原生：存储和计算拆开</text>
+  <rect class="b-a" x="320" y="30" width="96" height="56" rx="6"/>
+  <text class="t-b" x="368" y="54" text-anchor="middle">计算节点</text>
+  <text class="t-m" x="368" y="75" text-anchor="middle">本地盘＝缓存</text>
+  <rect class="b-a" x="427" y="30" width="96" height="56" rx="6"/>
+  <text class="t-b" x="475" y="54" text-anchor="middle">计算节点</text>
+  <text class="t-m" x="475" y="75" text-anchor="middle">本地盘＝缓存</text>
+  <rect class="b-a" x="534" y="30" width="96" height="56" rx="6"/>
+  <text class="t-b" x="582" y="54" text-anchor="middle">计算节点</text>
+  <text class="t-m" x="582" y="75" text-anchor="middle">本地盘＝缓存</text>
+  <path class="ln-a" d="M368 90 V146" marker-start="url(#m1c)" marker-end="url(#m1c)"/>
+  <path class="ln-a" d="M475 90 V146" marker-start="url(#m1c)" marker-end="url(#m1c)"/>
+  <path class="ln-a" d="M582 90 V146" marker-start="url(#m1c)" marker-end="url(#m1c)"/>
+  <text class="t-a" x="380" y="122">网络</text>
+  <rect class="b-ok" x="320" y="150" width="310" height="50" rx="8"/>
+  <text class="t-b" x="475" y="171" text-anchor="middle">对象存储（S3 这类）</text>
+  <text class="t-m" x="475" y="191" text-anchor="middle">自动分散到很多台机器上，坏几台也不丢</text>
+  <text class="t-m" x="320" y="226">计算节点可以随时换、随时增减</text>
+  <text class="t-a" x="320" y="246">代价：数据要经网络搬到算它的地方</text>
+</svg>
+<figcaption>本站画的示意图。真实的云原生数据库还会把小的值放在单独的服务里，这里省掉了；第 4 章会讲具体怎么做。</figcaption>
+</figure>
+
+<h3>什么时候才该上多台机器</h3>
+<p>用多台机器的理由，书里列了九条。有几条躲不掉：用户各拿各的设备，系统天然就是分布式的；有的国家要求本地人的数据存在本地。另外几条是可选的：数据大到一台机器装不下、要容错、要离用户近、要按负载伸缩。可选的那几条要掂量代价：每次跨网络的调用都可能失败，超时以后你不知道对方到底收没收到，贸然重试未必安全；调用另一台机器比调用本进程里的函数慢得多；出了问题要先查清是哪一环慢；每个服务有自己的库时，跨服务的数据一致性就成了应用自己的事。</p>
+<p>微服务是同一个取舍在组织层面的版本：系统按服务拆开，每个服务一个团队、一个接口，可以各自上线；代价是每个服务都要有自己的部署、监控、告警，接口改起来也牵一发动全身。无服务器（serverless）再进一步，连机器的起停都交给云厂商，按代码实际运行的时间计费。</p>
+<p>书里还拿超级计算机（高性能计算）和云对照。超算多用来跑天气、气候、分子模拟这类大批量的科学计算，一个节点坏了，常见的做法是把整个任务停下，修好再从上一个检查点接着算；云上的服务要一直在线，不能这样停。两边对信任、网络的假设也不一样。</p>
+<figure class="fig"><img src="../assets/img/01-pleiades.jpg" alt="一条长长的走廊，两侧是一排排外壳带蜂窝状网孔的计算机柜" loading="lazy">
+<figcaption>NASA 艾姆斯研究中心的超级计算机 Pleiades，图里是它的两排计算机柜。超算的节点都挤在一处，用户之间高度信任，云的节点则可能分布在几个地区，由互不信任的客户共用（§3.3）。照片与本书无关。<span class="src">NASA Ames Research Center，公有领域，维基共享资源</span></figcaption></figure>
+
+<h3>这一章点名的系统</h3>
+<div class="sys">
+  <div><b>ClickHouse、Druid、Pinot</b><span class="k">实时分析数据库</span> 书里叫「产品分析」系统：数据实时进来，查询要低延迟，直接嵌进面向用户的产品里。</div>
+  <div><b>Fivetran、Airbyte</b><span class="k">数据连接服务</span> 书里说它们专做一件事：从 CRM、邮件营销这类 SaaS 的 API 里把数据抽到你自己的仓库。</div>
+  <div><b>Snowflake</b><span class="k">云数据仓库</span> 书里拿它说明云服务的层层搭建：它的数据存在 S3 上，又有别的服务建在它上面。</div>
+  <div><b>Amazon S3</b><span class="k">对象存储</span> 接口比文件系统简单，自动把数据分散到很多机器上；很多云原生服务以它为底。</div>
+  <div><b>Amazon EBS</b><span class="k">虚拟磁盘</span> 能从一台虚拟机卸下、挂到另一台的「盘」，书里说它的每次读写其实都是网络调用。</div>
+  <div><b>Aurora、Spanner</b><span class="k">云原生事务数据库</span> 书里列为云原生的 OLTP 系统，和自建的 MySQL、PostgreSQL 对照。</div>
+  <div><b>DuckDB、SQLite</b><span class="k">单机数据库</span> 书里拿它们说明：硬件变强以后，很多负载一台机器就跑得动。</div>
+  <div><b>OpenTelemetry</b><span class="k">可观测性</span> 书里点名的追踪工具之一（另外两个是 Zipkin 和 Jaeger），记录哪个客户端调了哪个服务、花了多久。</div>
+  <div><b>Kubernetes</b><span class="k">编排框架</span> 部署服务的流行方式；书里说部署工具的选择不在本书范围内。</div>
+</div>
+
+<div class="table-wrap"><table class="terms">
+  <tr><th>英文</th><th>中文</th><th>一句话</th></tr>
+  <tr><td>OLTP</td><td><a class="term" href="../glossary.html#g-oltp">在线事务处理</a></td><td>按键取少量记录、按用户操作逐条增删改的访问模式（§1.1）。</td></tr>
+  <tr><td>OLAP / analytics</td><td><a class="term" href="../glossary.html#g-olap">联机分析处理 / 分析</a></td><td>扫过大量记录、算汇总统计的访问模式（§1.1）。</td></tr>
+  <tr><td>point query</td><td>点查</td><td>按键取出一条或几条记录（§1.1）。</td></tr>
+  <tr><td>data warehouse</td><td><a class="term" href="../glossary.html#g-data-warehouse">数据仓库</a></td><td>存放各业务系统数据的只读副本、专供分析的单独数据库（§1.2）。</td></tr>
+  <tr><td>ETL / ELT</td><td><a class="term" href="../glossary.html#g-etl">抽取、转换、加载</a></td><td>把业务库的数据抽出、整理、导入仓库；ELT 是先导入再转换（§1.2）。</td></tr>
+  <tr><td>HTAP</td><td>混合事务与分析处理</td><td>想在一个系统里同时做事务和分析，内部常是两套引擎（§1.2）。</td></tr>
+  <tr><td>data lake</td><td><a class="term" href="../glossary.html#g-data-lake">数据湖</a></td><td>只存文件、不规定格式和模式的集中存储（§1.2）。</td></tr>
+  <tr><td>system of record</td><td><a class="term" href="../glossary.html#g-system-of-record">记录系统（事实来源）</a></td><td>数据第一次写入、出了分歧以它为准的地方（§1.3）。</td></tr>
+  <tr><td>derived data</td><td><a class="term" href="../glossary.html#g-derived-data">派生数据</a></td><td>从别处的数据加工出来的，丢了能重建：缓存、索引、模型（§1.3）。</td></tr>
+  <tr><td>cloud native</td><td>云原生</td><td>从一开始就为利用云服务而设计的架构（§2.2）。</td></tr>
+  <tr><td>disaggregated</td><td>存算分离</td><td>存储和计算由不同的机器或服务负责（§2.2）。</td></tr>
+  <tr><td>node</td><td><a class="term" href="../glossary.html#g-node">节点</a></td><td>分布式系统里参与其中的每一个进程（§3）。</td></tr>
+  <tr><td>microservices</td><td>微服务</td><td>每个服务一个明确用途、一个负责的团队，经网络 API 互相调用（§3.2）。</td></tr>
+  <tr><td>serverless (FaaS)</td><td>无服务器（函数即服务）</td><td>云厂商按请求自动分配资源，按代码运行时间计费（§3.2）。</td></tr>
+  <tr><td>data minimization</td><td>数据最小化</td><td>不值得存的数据就不存，用完了就删（§4）。</td></tr>
+</table></div>
+
+<h2>词与短语</h2>
+<p class="lede">词条按在书里出现的顺序排，按节分组；读一节之前先把这一节的过一遍，读的时候就不用停。斜体小字是原句里连续的几个词，在电子书里搜它就能找到那一句。标着「每个字都认识」的，是字面意思会把你带偏的。行话（compaction、quorum 这类）不在这里，在上面的术语表里。</p>
+
+<h3 class="sec-head" id="s0">§0 <span class="first">Data is central to much application…</span></h3>
+<div class="entry trap"><div class="en">crunch</div><div class="loc" data-p="11">… Periodically crunch a large amount of …</div><div class="zh">（大量地）处理、计算数据</div><div class="note">本义是嘎吱嘎吱地嚼。crunch numbers 是「做大量计算」。</div></div>
+<div class="entry"><div class="en">glue together</div><div class="loc" data-p="12">… and glue them together with application …</div><div class="zh">（用代码）粘合起来</div><div class="note">技术圈常说的「胶水代码」（glue code）就是这个 glue。</div></div>
+<div class="entry trap"><div class="en">reason about</div><div class="loc" data-p="13">… how do you reason about their …</div><div class="zh">分析、推敲</div><div class="note">不是「讲道理」。reason about X 是「把 X 的行为和后果想清楚」，技术英文里极常见。</div></div>
+<div class="entry"><div class="en">the task at hand</div><div class="loc" data-p="13">… most appropriate for the task at hand …</div><div class="zh">手头的任务</div></div>
+<div class="entry trap"><div class="en">articulate</div><div class="loc" data-p="16">… might not be explicitly articulated …</div><div class="zh">（把想法）明确说出来</div><div class="note">不是「发音清楚」。这里说各团队的目标往往没有摆到桌面上。</div></div>
+<div class="entry trap"><div class="en">interface with</div><div class="loc" data-p="24">… sometimes interfaces with additional data systems …</div><div class="zh">和……对接</div><div class="note">interface 当动词用。</div></div>
+
+<h3 class="sec-head" id="s1">§1 <span class="first">Operational Versus Analytical Systems</span></h3>
+<div class="entry trap"><div class="en">novel</div><div class="loc" data-p="26">… look for novel insights in data …</div><div class="zh">新的、前所未见的</div><div class="note">形容词 novel 和「小说」无关。</div></div>
+<div class="entry trap"><div class="en">divide</div><div class="loc" data-p="32">… on the other side of this divide …</div><div class="zh">分界、鸿沟</div><div class="note">名词，指业务和分析两拨人之间的那条线。</div></div>
+
+<h3 class="sec-head" id="s1.1">§1.1 <span class="first">Characterizing Transaction Processing and Analytics</span></h3>
+<div class="entry trap"><div class="en">money changing hands</div><div class="loc" data-p="33">… didn’t involve money changing hands …</div><div class="zh">（有）钱款易手，即有交易发生</div></div>
+<div class="entry trap"><div class="en">stick</div><div class="loc" data-p="33">… the term transaction nevertheless stuck …</div><div class="zh">（名称）沿用下来</div><div class="note">不是「卡住」。a name stuck 是「这个叫法留下来了」。</div></div>
+<div class="entry trap"><div class="en">loosely</div><div class="loc" data-p="34">… This chapter uses the term loosely …</div><div class="zh">宽泛地、不严格地</div><div class="note">提醒你：这里的 transaction 不是第 8 章那个严格的定义。</div></div>
+<div class="entry trap"><div class="en">clear-cut</div><div class="loc" data-p="40">… analytics is not always clear-cut …</div><div class="zh">界限分明的</div></div>
+<div class="entry trap"><div class="en">baked into</div><div class="loc" data-p="68">… that are baked into the application …</div><div class="zh">写死在……里</div><div class="note">像烤进面包里的料，取不出来。hard-coded 的口语说法。</div></div>
+<div class="entry"><div class="en">one-off</div><div class="loc" data-p="68">… with one-off custom queries used only …</div><div class="zh">一次性的、临时的</div></div>
+<div class="entry"><div class="en">ingest</div><div class="loc" data-p="69">… Such systems ingest data in real …</div><div class="zh">接收、导入（数据）</div><div class="note">本义是「吞食、摄入」，数据系统里专指数据流进系统。</div></div>
+
+<h3 class="sec-head" id="s1.2">§1.2 <span class="first">Data Warehousing</span></h3>
+<div class="entry"><div class="en">data silo</div><div class="loc" data-p="73">… a problem known as data silos …</div><div class="zh">数据孤岛</div><div class="note">silo 本义是筒仓：各存各的，互不相通。</div></div>
+<div class="entry trap"><div class="en">to one’s heart’s content</div><div class="loc" data-p="77">… can query to their hearts’ content …</div><div class="zh">尽情地、想怎么……就怎么……</div></div>
+<div class="entry"><div class="en">commoditized</div><div class="loc" data-p="89">… can use commoditized file storage such …</div><div class="zh">成了大路货的、标准化的</div><div class="note">commodity 是谁家都差不多的大宗商品，所以便宜。</div></div>
+<div class="entry trap"><div class="en">sushi principle</div><div class="loc" data-p="90">… sometimes called the sushi principle …</div><div class="zh">寿司原则</div><div class="note">双关：寿司讲究生鱼，raw data 是「生」的、没加工过的数据。意思是原始数据更好。</div></div>
+<div class="entry trap"><div class="en">on the order of</div><div class="loc" data-p="92">… much faster, on the order of seconds …</div><div class="zh">在……的量级</div><div class="note">order 是数量级，不是「顺序」或「订单」。</div></div>
+
+<h3 class="sec-head" id="s1.3">§1.3 <span class="first">Systems of Record and Derived Data</span></h3>
+<div class="entry trap"><div class="en">fall back to</div><div class="loc" data-p="98">… you can fall back to the underlying …</div><div class="zh">退而去用</div><div class="note">缓存里没有，就退回去查下面的数据库。名词 fallback 是「后备方案」。</div></div>
+<div class="entry trap"><div class="en">redundant</div><div class="loc" data-p="99">… Technically speaking, derived data is redundant …</div><div class="zh">冗余的（重复了已有的信息）</div><div class="note">不是「多余、没用」。作者紧接着就说它对读的性能往往必不可少。</div></div>
+
+<h3 class="sec-head" id="s2">§2 <span class="first">Cloud Versus Self-Hosting</span></h3>
+<div class="entry"><div class="en">in-house</div><div class="loc" data-p="104">… should be done in-house or outsourced …</div><div class="zh">（在公司）内部自己做</div></div>
+<div class="entry"><div class="en">bespoke</div><div class="loc" data-p="106">… At one extreme is bespoke software …</div><div class="zh">定制的</div><div class="note">本是英国裁缝铺的用词，量身定做。</div></div>
+<div class="entry trap"><div class="en">middle ground</div><div class="loc" data-p="108">… The middle ground is off-the-shelf …</div><div class="zh">中间地带、折中</div></div>
+<div class="entry trap"><div class="en">off-the-shelf</div><div class="loc" data-p="108">… off-the-shelf software (open source or commercial) …</div><div class="zh">现成的（拿来就能用的）</div><div class="note">从货架上直接拿下来，和上一条 bespoke 相对。</div></div>
+<div class="entry trap"><div class="en">premises</div><div class="loc" data-p="108">… not literally on your own premises …</div><div class="zh">（自家的）场地、房屋</div><div class="note">on premises 是「部署在自己机房」。premises 不是 premise（前提）的复数。作者特意说明：机柜就算是在数据中心租的、并不真在自家，也这么叫。</div></div>
+
+<h3 class="sec-head" id="s2.1">§2.1 <span class="first">Pros and Cons of Cloud Services</span></h3>
+<div class="entry"><div class="en">free up</div><div class="loc" data-p="112">… can free up your team to …</div><div class="zh">腾出（人手、资源）</div></div>
+<div class="entry trap"><div class="en">provision</div><div class="loc" data-p="114">… If you provision your machines to …</div><div class="zh">准备、配置（机器和资源）</div><div class="note">动词，不是「规定、条款」。云里的 provisioning 就是「开机器、分资源」。</div></div>
+<div class="entry trap"><div class="en">smooth out</div><div class="loc" data-p="115">… scheduled to smooth out the load …</div><div class="zh">把（起伏）抹平</div><div class="note">把固定报表排队错开跑，负载曲线就没那么陡。</div></div>
+<div class="entry trap"><div class="en">politely ask</div><div class="loc" data-p="117">… all you can do is politely ask …</div><div class="zh">只能客客气气地去请求</div><div class="note">带点无奈的口吻：意思是这事你说了不算。</div></div>
+<div class="entry trap"><div class="en">at someone’s mercy</div><div class="loc" data-p="120">… you are at their mercy …</div><div class="zh">任人摆布</div></div>
+<div class="entry"><div class="en">subsume</div><div class="loc" data-p="123">… will not subsume all in-house data …</div><div class="zh">吞并、取代（把……纳入自己）</div></div>
+
+<h3 class="sec-head" id="s2.2">§2.2 <span class="first">Cloud Native System Architecture</span></h3>
+<div class="entry trap"><div class="en">from the ground up</div><div class="loc" data-p="125">… designed from the ground up to …</div><div class="zh">从零开始（重新设计）</div></div>
+<div class="entry trap"><div class="en">transparent</div><div class="loc" data-p="140">… it is transparent to the applications …</div><div class="zh">（对使用者）透明，即察觉不到它的存在</div><div class="note">技术英文里的 transparent 恰好和「公开可见」相反：应用根本看不见 RAID。</div></div>
+<div class="entry"><div class="en">ephemeral</div><div class="loc" data-p="141">… more like an ephemeral cache and …</div><div class="zh">短暂的、用完即弃的</div></div>
+
+<h3 class="sec-head" id="s2.3">§2.3 <span class="first">Operations in the Cloud Era</span></h3>
+<div class="entry trap"><div class="en">come and go</div><div class="loc" data-p="155">… as individual people come and go …</div><div class="zh">（人员）来来去去</div><div class="note">指入职、离职，不是上下班。</div></div>
+<div class="entry"><div class="en">work around</div><div class="loc" data-p="158">… perhaps work around its limitations …</div><div class="zh">绕过（限制）</div><div class="note">名词 workaround 是「变通办法」。</div></div>
+<div class="entry trap"><div class="en">only part of the story</div><div class="loc" data-p="158">… is only part of the story …</div><div class="zh">只是一部分（还有别的）</div></div>
+<div class="entry trap"><div class="en">as great as ever</div><div class="loc" data-p="159">… operations is as great as ever …</div><div class="zh">和以往一样大</div><div class="note">ever 在这里是「任何时候」，不是「永远」。</div></div>
+
+<h3 class="sec-head" id="s3">§3 <span class="first">Distributed Versus Single-Node Systems</span></h3>
+<div class="entry trap"><div class="en">under strain</div><div class="loc" data-p="178">… when the power grid is under strain …</div><div class="zh">负荷吃紧</div></div>
+
+<h3 class="sec-head" id="s3.1">§3.1 <span class="first">Problems with Distributed Systems</span></h3>
+<div class="entry trap"><div class="en">under the heading of</div><div class="loc" data-p="182">… developed under the heading of observability …</div><div class="zh">归在……这个名目下</div></div>
+<div class="entry trap"><div class="en">run counter to</div><div class="loc" data-p="183">… because they run counter to the …</div><div class="zh">和……背道而驰</div></div>
+
+<h3 class="sec-head" id="s3.2">§3.2 <span class="first">Microservices and Serverless</span></h3>
+<div class="entry trap"><div class="en">breed</div><div class="loc" data-p="188">… many services can itself breed complexity …</div><div class="zh">滋生、招来</div><div class="note">本义是繁殖。</div></div>
+<div class="entry trap"><div class="en">on-call</div><div class="loc" data-p="188">… alerting an on-call engineer in the …</div><div class="zh">值班的（随叫随到）</div><div class="note">on-call 轮值是运维的日常，半夜被告警叫醒的那位。</div></div>
+
+<h3 class="sec-head" id="s3.3">§3.3 <span class="first">Cloud Computing Versus Supercomputing</span></h3>
+<div class="entry"><div class="en">checkpoint</div><div class="loc" data-p="195">… checkpoint the state of their computation …</div><div class="zh">（定期）把状态存成检查点</div><div class="note">名词作动词：出了故障就从最后一个检查点接着算。</div></div>
+
+<h3 class="sec-head" id="s4">§4 <span class="first">Data Systems, Law, and Society</span></h3>
+<div class="entry trap"><div class="en">at large</div><div class="loc" data-p="200">… responsibility toward society at large …</div><div class="zh">整个的、全体的</div><div class="note">放在名词后面。不是「逍遥法外」那个 at large。</div></div>
+<div class="entry trap"><div class="en">the very</div><div class="loc" data-p="204">… influencing the very foundations of data …</div><div class="zh">连……本身、正是</div><div class="note">very 当形容词表强调：影响的不是边角，是地基。</div></div>
+<div class="entry trap"><div class="en">subject to interpretation</div><div class="loc" data-p="205">… principles that are subject to interpretation …</div><div class="zh">可以有不同理解、有待解释</div></div>
+<div class="entry trap"><div class="en">through this lens</div><div class="loc" data-p="205">… the technologies through this lens …</div><div class="zh">从这个角度（看）</div></div>
+<div class="entry"><div class="en">speculatively</div><div class="loc" data-p="208">… lots of data speculatively in case …</div><div class="zh">赌它将来有用地、先存着再说</div></div>
+
+<h3 class="sec-head" id="s5">§5 <span class="first">Summary</span></h3>
+<div class="entry"><div class="en">rush into</div><div class="loc" data-p="214">… not to rush into making a …</div><div class="zh">贸然去做</div></div>
+<div class="entry"><div class="en">be prone to</div><div class="loc" data-p="215">… many engineers are prone to ignoring …</div><div class="zh">容易（做某种不好的事）</div></div>
+
+<div class="gate"><b>到这里先停下，去读原书</b><p>下面是读完再看的：你的预测对不对、几道换成你来选的判断题、值得细读的句子和理解检查。先看了，读书时就只是在找答案。</p></div>
+
+<h2>读完：回到你的预测</h2>
+<div class="payoff" data-bet="01-a"><div class="mine"></div>
+<p>书里的答案是第三项（§3.1）：有时一台机器上的简单单线程程序，能明显跑赢一个一百多核的集群。同一节给了原因：调用另一台机器比调用本进程里的函数慢得多；数据量大时，把数据从存储搬到另一台机器去算本身就是开销，有时不如把计算搬到数据所在的机器上。书在这里引的是 McSherry 等人 2015 年的论文《Scalability! But at What COST?》。作者还说 CPU、内存和磁盘这些年变得更大更快，所以很多负载一台机器就够。想一想：如果数据涨到一台机器的磁盘放不下，或者任务必须几分钟内跑完，答案会变吗？</p></div>
+<div class="payoff" data-bet="01-b"><div class="mine"></div>
+<p>书里的答案是第二项（§2.1）：团队已经会搭建和运维需要的系统、负载又可预测（要的机器数不大起大落）时，自己买机器跑往往更便宜。云真正占便宜的是负载起伏大的时候：按峰值买的机器大部分时间闲着，而云上可以把用不着的资源还回去。第四项也不对：用云仍然需要运维团队，只是不用再管底层的系统管理（§2.3）。想一想：如果这家公司要新上一套团队里没人会运维的系统，答案会变吗？</p></div>
+
+<h2>判断题：换成你来选</h2>
+<p class="lede">场景都是本站编的。先选，再看解释；解释里写了对应的节号，拿不准就回原书看那一节。</p>
+<p class="quiz-score"></p>
+<div class="mcq" data-answer="2"><div class="q">分析该放在哪里跑？<span class="sec">§1.2</span></div>
+  <p class="ctx">场景：一家连锁健身房，会员和课程预约在 PostgreSQL 里，付款走一家第三方支付的 SaaS，门店的刷卡进门记录在另一套系统的 MongoDB 里。运营每周要看「各门店的到店率和续费率」，现在是分析师直接连生产库跑大查询，晚高峰时会员 App 明显变慢。</p>
+  <div class="opts"><button>给分析师开 PostgreSQL 的只读账号，规定只在凌晨跑</button><button>在生产库上多建几个索引，让分析查询快一点</button><button>用 ETL 把三处的数据定期导进一个单独的数据仓库，分析都去那里查</button><button>把三套系统合并成一个 HTAP 数据库，以后就不需要 ETL 了</button></div>
+  <div class="explain"><p>书里列的理由这里几乎全中：数据分在三个系统里（数据孤岛），一条查询拼不起来；分析查询贵，拖慢线上用户；付款数据还在 SaaS 那边，只能经它的 API 拿。数据仓库正是为此而设：各处数据的只读副本，分析师怎么查都不影响线上。凌晨跑只解决了一半，三处数据还是拼不到一起；多建索引会拖慢写，也治不了孤岛；书里说 HTAP 不替代数据仓库，企业通常是很多个业务库配一个仓库。</p></div></div>
+<div class="mcq" data-answer="0"><div class="q">索引丢了，该怎么办？<span class="sec">§1.3</span></div>
+  <p class="ctx">场景：一个网盘服务。文件的元数据（文件名、所在目录、所有者）存在 PostgreSQL 里，按文件名搜索走 Elasticsearch，热门目录的文件列表在 Redis 里缓存。一次误操作把 Elasticsearch 的索引全删了。</p>
+  <div class="opts"><button>从 PostgreSQL 重新读一遍元数据，重建搜索索引；这段时间搜索暂时不可用或变慢</button><button>这些数据永久丢失了，要从备份里恢复 PostgreSQL</button><button>从 Redis 里把缓存的数据导出来，用它重建索引</button><button>以后让 Elasticsearch 也当记录系统，新文件先写它</button></div>
+  <div class="explain"><p>搜索索引是派生数据：从正本加工出来，丢了能从源头重建。PostgreSQL 是记录系统，没受影响，不用恢复它。Redis 只缓存了一部分目录，它本身也是派生的，不完整，当不了源头。让 Elasticsearch 也当正本，系统里就有两个「以它为准」的地方，对不上时说不清谁对。</p></div></div>
+<div class="mcq" data-answer="3"><div class="q">这项负载该不该上云？<span class="sec">§2.1</span></div>
+  <p class="ctx">场景：一家物流公司的分析团队每月初要跑一次全量对账，数据几十 TB，希望几小时内跑完，这几天要用几百个核；其余时间只有零星的小查询。现在是按月初的峰值买了一批服务器自己跑。</p>
+  <div class="opts"><button>继续自建：负载是可预测的，自建总是更便宜</button><button>把服务器减掉一半，月初的对账慢慢跑上几天</button><button>换成一台最强的单机，把对账改成单线程程序</button><button>把这类分析搬到云上，月初按需扩出大量计算资源，跑完就还回去</button></div>
+  <div class="explain"><p>书里说云的优势在负载起伏大的时候：按峰值买的机器大部分时间闲着，不划算；分析负载的起伏往往特别大，大查询要很多资源并行，跑完就闲置。书里说自建更便宜的前提是负载可预测，指的是要的机器数不大起大落；这里虽然有规律，却正是大起大落。减半是拿时间换钱，业务能等时也算一个办法，但这里要求几小时内出结果。单机常常比想象的能干，可它照样要按峰值买、平时闲着，闲置的问题还在。</p></div></div>
+<div class="mcq" data-answer="1"><div class="q">五个人的团队，该不该拆微服务？<span class="sec">§3.2</span></div>
+  <p class="ctx">场景：一家五个人的创业公司在做宠物医院的预约应用，后端是一个单体服务加一个 PostgreSQL。新来的技术负责人提议拆成 12 个微服务，每个服务一个库，理由是「以后好扩展」。</p>
+  <div class="opts"><button>拆：微服务性能更好，越早拆越省事</button><button>先不拆：微服务主要解决多团队之间的协调，五个人就是一个团队，拆了只多出部署、监控和接口演化的开销</button><button>拆成 12 个服务，但共用现在这一个数据库，省得做数据同步</button><button>全部改成无服务器函数，这些问题就都不用考虑了</button></div>
+  <div class="explain"><p>书里说微服务主要是用技术手段解决人的问题：让很多团队不必彼此协调就能各自推进。这对大公司有价值，对团队少的小公司多半是不必要的开销。共用一个库更糟：整个库的结构等于成了每个服务 API 的一部分，谁都不敢改，一个服务的慢查询还会拖累别的服务。无服务器省掉的是管机器，服务怎么拆、接口怎么演化的问题一个不少，还多了执行时长的上限和首次调用慢的问题。</p></div></div>
+<div class="mcq" data-answer="2"><div class="q">这份数据该怎么存？<span class="sec">§4</span></div>
+  <p class="ctx">场景：一个跑步记录 App 每 30 秒记一次用户的精确位置，全部永久保存，理由是「以后做推荐也许用得上」。法务提出：要能响应用户的删除请求。</p>
+  <div class="opts"><button>照旧全存，删除请求来了就在日志末尾追加一条「已删除」标记</button><button>全部加密存储，这样存多少都没有风险</button><button>只存功能真正要用的（比如每次跑步的距离和时长），精确轨迹为明确的用途短期保留，到期删掉</button><button>把原始轨迹挪到数据湖里，不放在业务库，删除的事就交给分析团队</button></div>
+  <div class="explain"><p>这是书里讲的数据最小化：把泄露、被要求交出、违规罚款这些风险都算进去，有些数据根本不值得存。GDPR 也要求个人数据只为明确的目的收集，保存不超过需要的时间。在只追加的日志里加标记，旧数据还在原处，派生出去的副本也还在，这正是书里提的删除难题；加密能减轻泄露的后果，管不了被强制交出和合规的风险；挪进数据湖只是换个地方存，湖里的副本一样要删。</p></div></div>
+
+<h2>和本站其他书对照</h2>
+<div class="who">
+  <div><b>超时、重试和重复执行</b><span class="en">OSTEP 第 48 章</span>§3.1 说请求超时后不知道对方收没收到，贸然重试未必安全。OSTEP 那一章从通信层讲同一件事：确认、超时重传，以及接收方怎么用序列号认出重复的消息，还有模拟器能看到「执行了两次」。<a class="go" href="/ostep/chapters/48-distributed.html">去那一页 →</a></div>
+  <div><b>共享数据库是一种信息泄漏</b><span class="en">APOSD 第 5 章</span>§3.2 说几个服务共用一个库，库的结构就成了每个服务接口的一部分，难以再改。APOSD 管这叫「后门泄漏」：几个模块都懂同一种存储格式，接口里却谁都没写。<a class="go" href="/aposd/chapters/05-information-hiding.html">去那一页 →</a></div>
+</div>
+
+<h2>值得停下来的句子</h2>
+<blockquote class="quote">no one approach is fundamentally better than others; everything has pros and cons.<cite>— §0。本站译：没有哪一种做法从根本上比别的更好，一切都有利有弊。</cite></blockquote>
+<p>这句话是全书的立场，也是这一章的写法：四组对比，没有一组给出「选 A」的结论，只给出判断时要问的问题。读后面的章节时，它提醒你别去找「最好的数据库」：LSM 树和 B 树、各种复制方式，书里都按这个口径讲，选哪个取决于你的负载和你的团队。</p>
+<blockquote class="quote">Microservices are primarily a technical solution to a people problem: allowing different teams to make progress independently without having to coordinate with each other.<cite>— §3.2。本站译：微服务首先是用技术手段解决人的问题：让不同的团队各自推进，不必彼此协调。</cite></blockquote>
+<p>谈微服务时，人们常争的是性能、扩展性和技术栈；作者把它的主要价值放在组织上。这样一来判断就清楚了：团队少的公司拿不到这份好处，却要付全部的代价，包括部署、监控、接口演化和跨服务的一致性。这句话也点出全章的一条暗线：架构决定往往是人和组织的决定，不只是技术的。</p>
+
+<h2>检查一下理解</h2>
+<details class="check"><summary>1.（§1.1）「事务」这个词最初指什么？这一章用它指什么？</summary><p>最初对应一笔商业交易：卖货、向供应商下单、发工资。数据库用到不涉及钱的地方以后，词留了下来，指组成一个逻辑单元的一组读写。这一章用得更宽，只指低延迟的读和写。</p></details>
+<details class="check"><summary>2.（§1.1）为什么业务系统一般不让用户自己写 SQL，分析数据库却放手让人写？</summary><p>用户自己写的查询可能读到或改到无权访问的数据，也可能很贵、拖慢别人，所以业务系统只跑写在代码里的固定查询。分析库的使用者就是来探索的，查询本来就是临时想出来的。</p></details>
+<details class="check"><summary>3.（§1.2）既然有 HTAP，为什么还要数据仓库？</summary><p>很多 HTAP 系统内部还是一个事务系统加一个分析系统，只是共用一个接口。而且企业通常有很多个业务库、一个仓库，分析要把几个系统的数据放在一起查。HTAP 适合同一个应用既要扫大量行、又要低延迟读改单条记录的场合，比如反欺诈。</p></details>
+<details class="check"><summary>4.（§1.3）同一个 PostgreSQL，什么时候是记录系统，什么时候存的是派生数据？</summary><p>看你在应用里怎么用它。新数据先写进它、出了分歧以它为准，它就是记录系统；它的内容是从别处加工来的、丢了能重建，它就是派生的。数据库本身没有这个属性。</p></details>
+<details class="check"><summary>5.（§2.1）用云服务时「没有控制权」，具体指哪些情况？</summary><p>出了问题你既改不了、也看不见：功能、故障恢复、性能排查都得靠厂商。想走也不容易，很多云服务没有标准接口，换一家代价很高；数据的安全也只能托付给对方。</p></details>
+<details class="check"><summary>6.（§2.2）为什么云原生的数据库不直接在虚拟磁盘上跑传统的存储方式？</summary><p>虚拟磁盘是另一组机器模拟出来的块设备，模拟本身有开销；每次 I/O 都是一次网络调用，网络一抖应用就受影响。云原生系统改为直接建在对象存储这类为特定负载优化的存储服务上。</p></details>
+<details class="check"><summary>7.（§2.3）用了云，运维的哪些活少了，哪些还在？</summary><p>按台管机器的活少了：容量规划、装新机器、打系统补丁。还在的有：选合适的服务、把服务接起来、在服务之间迁移、盯着花费和配额，以及应用的安全、监控和排查故障。容量规划变成了财务规划。</p></details>
+<details class="check"><summary>8.（§3.3）超级计算机碰到节点故障，通常怎么处理？为什么云服务不这样做？</summary><p>停掉整个集群的任务，修好坏的节点，从上一个检查点重新算。云服务要持续给用户提供服务，整个停下来是不能接受的。</p></details>
+<p>用一句话说这一章（写给一个没读过的朋友）：</p>
+<textarea class="note" data-key="01-oneline" placeholder="比如：……"></textarea>
+
+<h2>精彩回顾</h2>
+<p class="recall-line"><b>一句话：</b>数据系统里没有标准答案：分不分开、上不上云、要不要多台机器、存不存这份数据，每个选择都要说清省了什么、付在哪。</p>
+<div class="recall">
+  <div class="item"><b>别直接查业务库</b><p>数据散在几十个系统里拼不起来，大查询拖慢线上用户，网络可能也不让进。所以要一个单独的数据仓库，靠 ETL 喂数据。</p><span class="sec">§1.2</span></div>
+  <div class="item"><b>生的数据更好</b><p>数据湖只放文件，不管格式和模式，把业务系统产出的原样留着，谁用谁加工。书里提到它的一个外号：寿司原则。</p><span class="sec">§1.2</span></div>
+  <div class="item"><b>丢了能不能重建</b><p>能重建的是派生数据：缓存、索引、仓库里的表、训练出的模型。是不是正本，不看用什么数据库，看你怎么用它。</p><span class="sec">§1.3</span></div>
+  <div class="item"><b>云不一定更便宜</b><p>会运维、负载平稳，自建往往更便宜；负载忽高忽低，云才占便宜。最大的代价是失去控制：服务挂了只能等。</p><span class="sec">§2.1</span></div>
+  <div class="item"><b>本地盘只是缓存</b><p>云上的虚拟机随时可能被换掉，本地盘跟着就没了。云原生系统把数据放进对象存储，存储和计算拆开。</p><span class="sec">§2.2</span></div>
+  <div class="item"><b>一台机器有时更快</b><p>跨网络的调用会失败、会超时，比函数调用慢得多。书里说一个单线程程序有时能赢过一百多核的集群。</p><span class="sec">§3.1</span></div>
+  <div class="item"><b>微服务解决人的问题</b><p>让很多团队不用协调就各自上线。团队少的小公司用它，多半只是多出一堆部署和监控的开销。</p><span class="sec">§3.2</span></div>
+  <div class="item"><b>不值得存的就别存</b><p>存数据的成本不只是账单，还有泄露、被强制交出、违规罚款。数据最小化和「先存着再说」正好相反。</p><span class="sec">§4</span></div>
+</div>
+
+</main>
+</body>
+</html>

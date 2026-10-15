@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 10 章 · 一致性与共识 · DDIA 导读</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/chapters.js"></script>
+<script src="../assets/sections.js"></script>
+<script src="../assets/dd.js"></script>
+</head>
+<body data-chapter="10">
+<main>
+
+<h2>这一章在做什么</h2>
+<div class="gist"><p>复制让数据有了好几份。第 6 章把由此带来的不一致交给应用去处理，这一章走另一条路：让系统看起来只有一份数据。先给「强一致」一个精确的定义，叫线性一致性，看哪几种复制方式做得到、要付出多少延迟；再看分布式的发号器和逻辑时钟为什么只能保证因果；最后落到共识：选主、锁、唯一约束、共享日志、原子提交，其实是同一个问题。代价是每一步都要多数节点点头。</p></div>
+<figure class="fig"><img src="../assets/img/10-chronometer.jpg" alt="一只装在打开的木箱里的航海天文钟，白色表盘上有罗马数字和两个小副表盘" loading="lazy">
+<figcaption>伦敦制表商 Charles Frodsham 做的一只航海天文钟，装在箱子里。这一章的题词引了一句航海老话：出海别带两只钟，要么带一只，要么带三只。两只钟走得不一样时，你不知道该信哪只；有三只，就能看哪两只说得一样。这正是 §3 里「多数派」的道理。<span class="src">Charles Frodsham，CC BY-SA 4.0，维基共享资源</span></figcaption></figure>
+
+<h2>读之前：先预测</h2>
+<p>这一章是「分布到多台机器」这一块的收口，前面三章留下的问题都在这里回收：第 6 章的复制延迟、多主和无主复制的冲突、法定人数；第 8 章的比较并设置（CAS）和两阶段提交里那个单点的协调者；第 9 章的租约、防护令牌、不可靠的时钟和系统模型。往后看，第 12 章的流处理会用到这里的共享日志，第 13 章会讨论怎样在不要线性一致的情况下仍然做对。</p>
+
+<div class="bet" data-key="10-a">
+  <div class="q">一个无主复制（Dynamo 风格）的键值存储，n = 3、w = 3、r = 2，满足 w + r &gt; n。x 原来是 0，一个写入正在把它改成 1，三个副本还没全部收到。读者甲读了两个副本，拿到 1；甲读完以后，读者乙才开始，读的是另外两个副本。乙可能读到 0 吗？</div>
+  <div class="opts">
+    <button>不可能：w + r &gt; n，读和写的副本一定有重叠，乙一定读到 1</button>
+    <button>不可能：甲已经读到 1，说明写入已经生效了</button>
+    <button>可能，但只在有副本宕机或网络分区的时候</button>
+    <button>可能：什么故障都没有，只因为写入还在路上，乙读的两个副本恰好都还没收到</button>
+    <button>可能，但只在用时钟打时间戳、时钟又有偏差的时候</button>
+  </div>
+  <textarea class="note" data-key="10-a-bet" placeholder="你为什么这么猜？一两句就行"></textarea>
+</div>
+
+<div class="bet" data-key="10-b">
+  <div class="q">三个进程用 Lamport 时间戳给事件编号。事件 p 的时间戳是 (3, A)，事件 q 的是 (5, C)。你能得出什么结论？</div>
+  <div class="opts">
+    <button>p 一定发生在 q 之前</button>
+    <button>p 和 q 一定是并发的，因为它们在不同的进程上</button>
+    <button>q 不可能发生在 p 之前；但 p 是先于 q 还是和 q 并发，看不出来</button>
+    <button>什么都得不出来，连 q 会不会先于 p 都不知道</button>
+    <button>计数差 2，说明从 p 到 q 中间隔了两次消息传递</button>
+  </div>
+  <textarea class="note" data-key="10-b-bet" placeholder="你为什么这么猜？"></textarea>
+</div>
+
+<div class="crux"><p>数据有好几份，机器会坏，网络会慢。怎样让这样一组机器对外表现得像只有一份数据、一个说了算的人？要付出什么？什么时候不值得付？</p></div>
+<ol class="qs">
+  <li>线性一致性和可串行化都像是「排成一个顺序」，它们各自管的是什么？<span class="sec">§1.1</span></li>
+  <li>无主复制里 w + r &gt; n 的法定人数读写，为什么还不算线性一致？<span class="sec">§1.3</span></li>
+  <li>Lamport 时间戳和因果一致，为什么用它给两个库的写入编号还是会出错？<span class="sec">§2.2</span></li>
+  <li>CAS、共享日志、原子提交为什么都能叫「共识」？哪一个只差一点？<span class="sec">§3.1</span></li>
+</ol>
+
+<h2>这一章的骨架</h2>
+<p>这一章分三段：§1 定义并评估线性一致性，§2 从 ID 生成器绕到逻辑时钟，§3 讲共识。容易乱的是 §2：它看上去跑题了，其实是在比较「保证因果」和「保证线性一致」差在哪，又说明两者都不够用来做容错的锁，把你推进 §3。§3.1 一口气列了五种问题，读的时候每一种都问一句：这里要决定的是「谁赢」还是「什么顺序」。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 390" role="img" aria-label="这一章的骨架：目标是让多份副本看起来像一份并且能容错；三条线分别是线性一致性、ID 与逻辑时钟、共识，各列出几个小节；逻辑时钟做不了容错的锁，于是引出共识">
+  <defs><marker id="a10s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <rect class="box" x="170" y="8" width="300" height="36" rx="8"/>
+  <text class="t-b" x="320" y="31" text-anchor="middle">让几份副本像一份，还要能容错</text>
+  <path class="ln" d="M320 44 V62 M110 62 H530 M110 62 V80 M320 62 V80 M530 62 V80"/>
+  <rect class="b-a" x="10" y="80" width="200" height="34" rx="6"/>
+  <text class="t-b" x="110" y="102" text-anchor="middle">线性一致性 §1</text>
+  <rect class="b-a" x="220" y="80" width="200" height="34" rx="6"/>
+  <text class="t-b" x="320" y="102" text-anchor="middle">ID 与逻辑时钟 §2</text>
+  <rect class="b-a" x="430" y="80" width="200" height="34" rx="6"/>
+  <text class="t-b" x="530" y="102" text-anchor="middle">共识 §3</text>
+  <rect class="box" x="10" y="128" width="200" height="34" rx="6"/>
+  <text x="110" y="150" text-anchor="middle">定义：新近性保证 §1.1</text>
+  <rect class="box" x="10" y="170" width="200" height="34" rx="6"/>
+  <text x="110" y="192" text-anchor="middle">哪里非它不可 §1.2</text>
+  <rect class="box" x="10" y="212" width="200" height="34" rx="6"/>
+  <text x="110" y="234" text-anchor="middle">哪种复制做得到 §1.3</text>
+  <rect class="b-warn" x="10" y="254" width="200" height="34" rx="6"/>
+  <text x="110" y="276" text-anchor="middle">代价：分区与延迟 §1.4</text>
+  <rect class="box" x="220" y="128" width="200" height="34" rx="6"/>
+  <text x="320" y="150" text-anchor="middle">分布式发号丢了顺序 §2</text>
+  <rect class="box" x="220" y="170" width="200" height="34" rx="6"/>
+  <text x="320" y="192" text-anchor="middle">逻辑时钟只保因果 §2.1</text>
+  <rect class="box" x="220" y="212" width="200" height="34" rx="6"/>
+  <text x="320" y="234" text-anchor="middle">线性一致的发号器 §2.2</text>
+  <rect class="b-bad" x="220" y="254" width="200" height="34" rx="6"/>
+  <text x="320" y="276" text-anchor="middle">仍做不了容错的锁 §2.2</text>
+  <rect class="box" x="430" y="128" width="200" height="34" rx="6"/>
+  <text x="530" y="150" text-anchor="middle">FLP 为什么不碍事 §3</text>
+  <rect class="box" x="430" y="170" width="200" height="34" rx="6"/>
+  <text x="530" y="192" text-anchor="middle">五种问题彼此等价 §3.1</text>
+  <rect class="box" x="430" y="212" width="200" height="34" rx="6"/>
+  <text x="530" y="234" text-anchor="middle">任期号加多数票 §3.2</text>
+  <rect class="box" x="430" y="254" width="200" height="34" rx="6"/>
+  <text x="530" y="276" text-anchor="middle">协调服务 §3.3</text>
+  <path class="ln-a" d="M320 288 V312 H530 V292" marker-end="url(#a10s)"/>
+  <text class="t-a" x="425" y="328" text-anchor="middle">所以要共识</text>
+  <rect class="b-ok" x="10" y="346" width="620" height="34" rx="6"/>
+  <text x="320" y="368" text-anchor="middle">贯穿全章：在一台机器上都很简单，难在机器会坏、网络会慢</text>
+</svg>
+<figcaption>本站画的全章结构。三列从左往右读，中间一列是连接：它说明为什么只有时钟还不够，必须走到共识。</figcaption>
+</figure>
+<p class="lede">边读边填：每行一个问题，读到答案就写一两句。只存在你这台设备的浏览器里，别人看不到。</p>
+<div class="table-wrap"><table class="findit">
+  <tr><th>要找的</th><th>带着这个问题读，找到了就写下来</th></tr>
+  <tr><td>两个「排成顺序」</td><td><p class="q">线性一致和可串行化各管什么？两样都要，叫什么？<span class="sec">§1.1</span></p><input class="note" data-key="10-f1" aria-label="两个「排成顺序」：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>四种复制方式</td><td><p class="q">单主、共识、多主、无主，各自能不能做到线性一致？卡在哪？<span class="sec">§1.3</span></p><input class="note" data-key="10-f2" aria-label="四种复制方式：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>真正的代价</td><td><p class="q">很多系统放弃线性一致，主要是为了什么？<span class="sec">§1.4</span></p><input class="note" data-key="10-f3" aria-label="真正的代价：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>逻辑时钟的边界</td><td><p class="q">Lamport 时间戳保证什么，不保证什么？<span class="sec">§2.1</span><span class="sec">§2.2</span></p><input class="note" data-key="10-f4" aria-label="逻辑时钟的边界：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>发号器做锁</td><td><p class="q">有了线性一致的发号器，为什么还做不了容错的锁？<span class="sec">§2.2</span></p><input class="note" data-key="10-f5" aria-label="发号器做锁：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>只差一点</td><td><p class="q">fetch-and-add 为什么只能给两个节点解决共识？<span class="sec">§3.1</span></p><input class="note" data-key="10-f6" aria-label="只差一点：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>先有主还是先有共识</td><td><p class="q">选主要靠共识，共识又要有主。这个死结怎么解开？<span class="sec">§3.2</span></p><input class="note" data-key="10-f7" aria-label="先有主还是先有共识：你的答案" placeholder="你的答案"></td></tr>
+</table></div>
+<details class="reveal"><summary>读完了？对照我找到的</summary><ul>
+  <li>两个「排成顺序」：可串行化管多对象的事务，排出的顺序可以和真实时间不符；线性一致管单个对象，要求新近。两样都要叫严格可串行化。</li>
+  <li>四种复制方式：单主要读写都走主、并且确知谁是主；共识大多可以，读也要确认主的身份；多主不行；无主基本不行，法定人数也不够。</li>
+  <li>真正的代价：多数是为了性能（延迟），不是为了容错；而且这份延迟一直在付，不只在网络出故障时。</li>
+  <li>逻辑时钟的边界：给出和因果一致的全序；管不了自己没见过的时间戳，所以不线性一致，也分不出并发。</li>
+  <li>发号器做锁：要确认自己的号最小，得听到所有节点的回音，有一个联系不上就只能干等。</li>
+  <li>只差一点：拿到 0 的知道自己赢了，其余的只知道自己输了、不知道谁赢；赢家一挂，大家悬着。</li>
+  <li>先有主还是先有共识：只保证每个任期里主唯一；追加日志前再拉一次多数票，两次多数必然重叠，过期的主会被发现。</li>
+</ul></details>
+
+<h2>分节地图</h2>
+<p class="lede">全章约 1.7 万词，建议分五次读。第一、二次是线性一致性，例子多、读得快；第三次的逻辑时钟篇幅不长但概念密；第四次的 §3.1 是全章最抽象的一节，五种问题一个接一个，最好一口气读完；第五次回到工程，节奏轻一些。</p>
+<ol class="secmap">
+  <li class="sit">第一次坐下<span>§0–§1.2 · 约 3600 词 · 什么是线性一致，什么时候非它不可</span></li>
+  <li data-sec="0"><b>Lots of things can go wrong…<span class="w">约 500 词</span></b><span class="cn">开篇</span><span class="what">最终一致和强一致两种思路；这一章只走强一致这条路，分三块讲。</span></li>
+  <li data-sec="1"><b>Linearizability<span class="w">约 400 词</span></b><span class="cn">线性一致性</span><span class="what">目标是让多副本的库用起来像单机。一个看比分的例子引出「新近」。</span></li>
+  <li data-sec="1.1"><b>What Makes a System Linearizable?<span class="w">约 1600 词</span></b><span class="cn">什么样的系统算线性一致</span><span class="what">用请求的时间条画读写，规则一条条加上去；方框区分它和可串行化。</span></li>
+  <li data-sec="1.2"><b>Relying on Linearizability<span class="w">约 1100 词</span></b><span class="cn">依赖线性一致的场合</span><span class="what">锁与选主、唯一约束、跨通道的时序依赖：三种非它不可的情形。</span></li>
+  <li class="sit">第二次坐下<span>§1.3–§1.4 · 约 2300 词 · 哪些系统做得到，代价是什么</span></li>
+  <li data-sec="1.3"><b>Implementing Linearizable Systems<span class="w">约 800 词</span></b><span class="cn">实现线性一致的系统</span><span class="what">第 6 章的几种复制方式逐个过一遍。留意法定人数的那个反例。</span></li>
+  <li data-sec="1.4"><b>The Cost of Linearizability<span class="w">约 1400 词</span></b><span class="cn">线性一致的代价</span><span class="what">网络断开时只能二选一；CAP 为什么不好用；平时就在付的代价是什么。</span></li>
+  <li class="sit">第三次坐下<span>§2–§2.2 · 约 3200 词 · 从发号器绕到逻辑时钟</span></li>
+  <li data-sec="2"><b>ID Generators and Logical Clocks<span class="w">约 1000 词</span></b><span class="cn">ID 生成器与逻辑时钟</span><span class="what">单机自增 ID 好在哪；几种分布式发号办法各自丢了什么。</span></li>
+  <li data-sec="2.1"><b>Logical Clocks<span class="w">约 1100 词</span></b><span class="cn">逻辑时钟</span><span class="what">Lamport 时钟、混合逻辑时钟、向量时钟，各自能比出什么、比不出什么。</span></li>
+  <li data-sec="2.2"><b>Linearizable ID Generators<span class="w">约 1100 词</span></b><span class="cn">线性一致的 ID 生成器</span><span class="what">只保因果会出什么事；怎样做到线性一致；为什么还不够实现锁。</span></li>
+  <li class="sit">第四次坐下<span>§3–§3.1 · 约 3300 词 · 共识和它的几副面孔</span></li>
+  <li data-sec="3"><b>Consensus<span class="w">约 600 词</span></b><span class="cn">共识</span><span class="what">前面那些难题其实是同一个问题；方框解释 FLP 结论为什么不妨碍实践。</span></li>
+  <li data-sec="3.1"><b>The Many Faces of Consensus<span class="w">约 2700 词</span></b><span class="cn">共识的多种面孔</span><span class="what">单值共识、CAS、共享日志、fetch-and-add、原子提交，看它们怎样互相转化。</span></li>
+  <li class="sit">第五次坐下<span>§3.2–§4 · 约 4300 词 · 真实的共识系统和协调服务</span></li>
+  <li data-sec="3.2"><b>Consensus in Practice<span class="w">约 2000 词</span></b><span class="cn">实践中的共识</span><span class="what">任期号和两轮投票；新主怎样接住旧日志；共识的好处和代价。</span></li>
+  <li data-sec="3.3"><b>Coordination Services<span class="w">约 1300 词</span></b><span class="cn">协调服务</span><span class="what">ZooKeeper、etcd 这类系统提供什么，适合和不适合拿来做什么。</span></li>
+  <li data-sec="4"><b>Summary<span class="w">约 1000 词</span></b><span class="cn">小结</span><span class="what">全章回顾。先自己回忆一遍再读它。</span></li>
+</ol>
+
+<h2>先用中文过一遍</h2>
+<h3>线性一致性：假装只有一份数据</h3>
+<p>复制以后，同一个值在几台机器上各有一份，一次更新到达各处的时间不同。线性一致性（linearizability）要求系统对外表现得像只有一份数据：每个操作都在「请求发出」和「收到响应」之间的某一刻一下子生效。客户端看不到那一刻在哪，只知道它落在自己那根时间条里。</p>
+<p>落到读上是两条规矩。和写在时间上重叠的读，读到旧值、新值都行，因为谁也说不清服务器先处理了哪个。但只要有一个读者读到了新值，此后才开始的读，不管来自哪个客户端，都不许再读到旧值；值不能在新旧之间来回跳。所以它是一种关于「新近」的保证。它只管单个对象，不把几次读写打包成事务，这是它和可串行化的分界，§1.1 有个方框专门讲。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 262" role="img" aria-label="线性一致的读：售票服务把余票从 5 改成 4，写入在某一刻生效；读者甲的三次读分别读到 5、5、4；读者乙一次跨过生效点的读读到 5 或 4 都行，另一次在甲读到 4 之后才开始的读必须读到 4">
+  <defs><marker id="a10l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-m" x="10" y="52">售票服务</text>
+  <text class="t-m" x="10" y="112">读者甲</text>
+  <text class="t-m" x="10" y="172">读者乙</text>
+  <rect class="b-warn" x="150" y="36" width="330" height="24" rx="5"/>
+  <text x="220" y="53" text-anchor="middle">写：余票 5 → 4</text>
+  <path class="ln-d" d="M290 28 V200"/>
+  <text class="t-a" x="296" y="22">生效的那一刻（谁也看不见）</text>
+  <rect class="box" x="92" y="96" width="50" height="24" rx="5"/>
+  <text class="t-mono" x="117" y="113" text-anchor="middle">读 5</text>
+  <rect class="box" x="170" y="96" width="100" height="24" rx="5"/>
+  <text class="t-mono" x="220" y="113" text-anchor="middle">读 5</text>
+  <rect class="b-ok" x="300" y="96" width="80" height="24" rx="5"/>
+  <text class="t-mono" x="340" y="113" text-anchor="middle">读 4</text>
+  <rect class="box" x="190" y="156" width="130" height="24" rx="5"/>
+  <text x="255" y="173" text-anchor="middle">读 5 或 4 都行</text>
+  <rect class="b-ok" x="410" y="156" width="110" height="24" rx="5"/>
+  <text x="465" y="173" text-anchor="middle">必须读 4</text>
+  <path class="ln-a" d="M380 120 L408 154" marker-end="url(#a10l)"/>
+  <text class="t-bad" x="410" y="200">读到 5 就违规：甲已经读到 4 了</text>
+  <path class="ln" d="M90 226 H620" marker-end="url(#a10l)"/>
+  <text class="t-m" x="620" y="246" text-anchor="end">真实时间 →</text>
+  <text class="t-m" x="90" y="246">每根条：左端发出请求，右端收到响应</text>
+</svg>
+<figcaption>本站画的示意图，例子是编的。和写重叠的读两种结果都合法；一旦有人读到新值，之后开始的读就只能读新值。</figcaption>
+</figure>
+
+<h3>逻辑时钟：数事件，不看钟表</h3>
+<p>几台机器各自发号时，号码的大小和事件的先后对不上：时钟有快有慢，分段发的号各走各的。逻辑时钟（logical clock）不管现在几点，只数事件。Lamport 的做法就两条：自己每产生一个时间戳，计数先加一；每看到别人带来的时间戳，如果比自己的计数大，就把计数抬到那个值。时间戳写成（计数, 节点 ID），先比计数，计数相同再比节点 ID，任意两个都能比出大小。</p>
+<p>它保证的方向是：X 先于 Y 发生（Y 所在的进程沿着消息链能追到 X），X 的时间戳就一定更小。反过来不成立。两件互不知情的事也会被排出一个先后，只看时间戳分不出「先发生」和「并发」。想分辨并发，要用向量时钟：每个节点一格计数，比较时逐格比，代价是时间戳随节点数变长。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 280" role="img" aria-label="三个进程 A、B、C 的 Lamport 时间戳：A 发消息给 B，B 收到后把计数抬到 2，再发给 C；C 自己的事件 (1,C)、(2,C)、(3,C) 和 A 的事件互不知情；(1,A) 小于 (3,C) 但两者并发，(2,A) 经过 B 传到 C 的 (4,C)，一定更小">
+  <defs><marker id="a10c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="54">进程 A</text>
+  <text class="t-b" x="10" y="134">进程 B</text>
+  <text class="t-b" x="10" y="214">进程 C</text>
+  <path class="ln" d="M70 50 H620 M70 130 H620 M70 210 H620"/>
+  <circle class="b-warn" cx="120" cy="50" r="10"/>
+  <circle class="f-a" cx="120" cy="50" r="5"/>
+  <text class="t-mono" x="120" y="34" text-anchor="middle">(1,A)</text>
+  <circle class="f-a" cx="230" cy="50" r="5"/>
+  <text class="t-mono" x="230" y="34" text-anchor="middle">(2,A) 发</text>
+  <circle class="f-a" cx="150" cy="130" r="5"/>
+  <text class="t-mono" x="150" y="118" text-anchor="middle">(1,B)</text>
+  <path class="ln-a" d="M230 50 L298 128" marker-end="url(#a10c)"/>
+  <rect class="box" x="296" y="124" width="12" height="12" rx="2"/>
+  <text class="t-m" x="302" y="154" text-anchor="middle">收到 2：计数 1→2</text>
+  <circle class="f-a" cx="390" cy="130" r="5"/>
+  <text class="t-mono" x="390" y="118" text-anchor="middle">(3,B) 发</text>
+  <path class="ln-a" d="M390 130 L478 208" marker-end="url(#a10c)"/>
+  <circle class="f-a" cx="110" cy="210" r="5"/>
+  <text class="t-mono" x="110" y="198" text-anchor="middle">(1,C)</text>
+  <circle class="f-a" cx="200" cy="210" r="5"/>
+  <text class="t-mono" x="200" y="198" text-anchor="middle">(2,C)</text>
+  <circle class="b-warn" cx="320" cy="210" r="10"/>
+  <circle class="f-a" cx="320" cy="210" r="5"/>
+  <text class="t-mono" x="320" y="192" text-anchor="middle">(3,C)</text>
+  <rect class="box" x="474" y="204" width="12" height="12" rx="2"/>
+  <text class="t-m" x="480" y="234" text-anchor="middle">收到 3：计数不变</text>
+  <circle class="f-a" cx="570" cy="210" r="5"/>
+  <text class="t-mono" x="570" y="198" text-anchor="middle">(4,C)</text>
+  <text class="t-bad" x="10" y="262">(1,A) &lt; (3,C)，可两件事互不知情：并发</text>
+  <text class="t-ok" x="350" y="262">(2,A) 经 B 传到 (4,C)：一定更小</text>
+</svg>
+<figcaption>本站画的示意图。圆点是产生时间戳的事件，小方块是收到消息：收到只调整计数，不产生新的时间戳。两个带圈的事件计数不同，但谁也不知道谁。</figcaption>
+</figure>
+<figure class="fig narrow"><img src="../assets/img/10-lamport.jpg" alt="一位白发、留着胡子、戴墨镜的男子站在石板铺的庭院里，穿白色 T 恤，背着双肩包" loading="lazy">
+<figcaption>Leslie Lamport，2006 年 9 月在意大利乌迪内的一次 IFIP 会议期间。书里说他 1978 年提出了 Lamport 时钟，那篇论文是分布式系统领域被引用最多的论文之一（§2.1）。§3 点名的 Paxos 共识算法也出自他手，他因分布式和并发系统方面的工作获得 2013 年的图灵奖。照片经本站裁切。<span class="src">Andrej Bauer，CC BY-SA 2.5 si，维基共享资源</span></figcaption></figure>
+
+<h3>共识：任期号，加两次多数票</h3>
+<p>单主复制里，主节点说了算：谁拿到锁、日志下一条写什么、事务提交还是回滚，都由它决定。难的是主节点挂了怎么办：换主需要所有节点对「谁是主」意见一致，这本身又是一个要达成一致的问题。</p>
+<p>常用的共识算法这样绕开：不保证任何时刻只有一个主，只保证每个任期（epoch，Raft 叫 term）里最多一个主，任期号只增不减。某个节点一段时间听不到主的声音，就用一个更大的任期号发起选举，拿到多数票就当选。当选以后，主每要往日志里追加一条，还要再拉一次多数票；投票的节点只要见过更大的任期号，就投反对。两次「多数」必然至少有一个节点重叠，所以一个停顿后醒来、还以为自己是主的旧主，一定会在第二轮投票时撞上那个已经见过新任期的节点。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 290" role="img" aria-label="共识里的两轮多数票：第一轮 N3 用任期 4 拉票，N2、N3、N4 同意，过半当选；第二轮停顿中醒来的旧主 N1 仍用任期 3 想追加一条日志，只联系得上 N2 和 N5，N2 见过任期 4 拒绝，只得两票，不够多数，追加失败">
+  <text class="t-b" x="10" y="20">① 旧主 N1 停顿，N3 用任期 4 拉票：N2、N3、N4 同意，3/5 过半</text>
+  <circle class="b-bad" cx="80" cy="66" r="22"/><text class="t-b" x="80" y="71" text-anchor="middle">N1</text>
+  <circle class="b-ok" cx="200" cy="66" r="22"/><text class="t-b" x="200" y="71" text-anchor="middle">N2</text>
+  <circle class="b-ok" cx="320" cy="66" r="22"/><text class="t-b" x="320" y="71" text-anchor="middle">N3</text>
+  <circle class="b-ok" cx="440" cy="66" r="22"/><text class="t-b" x="440" y="71" text-anchor="middle">N4</text>
+  <circle class="box" cx="560" cy="66" r="22"/><text class="t-b" x="560" y="71" text-anchor="middle">N5</text>
+  <text class="t-m" x="80" y="106" text-anchor="middle">旧主，正在停顿</text>
+  <text class="t-m" x="320" y="106" text-anchor="middle">新主，任期 4</text>
+  <text class="t-m" x="560" y="106" text-anchor="middle">没收到拉票</text>
+  <text class="t-b" x="10" y="150">② N1 醒来，还用任期 3 想追加一条日志，只联系得上 N2、N5</text>
+  <circle class="b-warn" cx="80" cy="196" r="22"/><text class="t-b" x="80" y="201" text-anchor="middle">N1</text>
+  <circle class="b-bad" cx="200" cy="196" r="22"/><text class="t-b" x="200" y="201" text-anchor="middle">N2</text>
+  <circle class="box" cx="320" cy="196" r="22"/><text class="t-b" x="320" y="201" text-anchor="middle">N3</text>
+  <circle class="box" cx="440" cy="196" r="22"/><text class="t-b" x="440" y="201" text-anchor="middle">N4</text>
+  <circle class="b-ok" cx="560" cy="196" r="22"/><text class="t-b" x="560" y="201" text-anchor="middle">N5</text>
+  <text class="t-m" x="200" y="236" text-anchor="middle">拒绝：见过任期 4</text>
+  <text class="t-m" x="560" y="236" text-anchor="middle">同意</text>
+  <text class="t-a" x="10" y="270">N2 两轮都在场：两个多数必然重叠。N1 只得 2/5 票，追加失败</text>
+</svg>
+<figcaption>本站画的示意图，五个节点、任期号都是编的。真实算法里，旧主收到拒绝后会知道有了新任期，自己退下来。</figcaption>
+</figure>
+
+<h3>这一章点名的系统</h3>
+<div class="sys">
+  <div><b>ZooKeeper</b><span class="k">协调服务</span> 用 Zab 共识算法。书里特意说明：它的写是线性一致的，读可能读到旧值。</div>
+  <div><b>etcd</b><span class="k">协调服务</span> 用 Raft，书里说 Kubernetes 依赖它。从第 3 版起默认提供线性一致的读。</div>
+  <div><b>Chubby</b><span class="k">锁服务</span> Google 内部的锁服务，ZooKeeper、etcd 这类协调服务都以它为原型。</div>
+  <div><b>Apache Curator</b><span class="k">客户端库</span> 在 ZooKeeper 之上提供选主、锁这类现成的做法。</div>
+  <div><b>Spanner</b><span class="k">分布式数据库</span> Google 的数据库，提供严格可串行化；时钟读数带误差区间，提交前先等过这段误差。</div>
+  <div><b>CockroachDB</b><span class="k">分布式数据库</span> 用混合逻辑时钟；书里说它可串行化，但不是严格可串行化。</div>
+  <div><b>TiDB / TiKV</b><span class="k">分布式数据库</span> 用一个单独的「时间戳预言机」发线性一致的时间戳，思路来自 Google 的 Percolator。</div>
+  <div><b>FoundationDB</b><span class="k">分布式键值库</span> 书里和 Spanner 并列，提供严格可串行化。</div>
+  <div><b>Kafka</b><span class="k">消息系统</span> 可以打开「不干净的选主」，让没跟上的副本当主，用一致性换恢复速度。</div>
+</div>
+
+<div class="table-wrap"><table class="terms">
+  <tr><th>英文</th><th>中文</th><th>一句话</th></tr>
+  <tr><td>linearizability</td><td><a class="term" href="../glossary.html#g-linearizability">线性一致性</a></td><td>多副本表现得像只有一份数据，每个操作在某一刻原子地生效（§1）。</td></tr>
+  <tr><td>register</td><td>寄存器</td><td>理论里对「一个可读写的对象」的叫法，实际可以是一个键、一行、一个文档（§1.1）。</td></tr>
+  <tr><td>strict serializability</td><td>严格可串行化</td><td>可串行化加线性一致：事务排得出顺序，并且这个顺序符合真实时间（§1.1）。</td></tr>
+  <tr><td>network partition</td><td>网络分区</td><td>各部分内部通，彼此之间断开（§1.4）。</td></tr>
+  <tr><td>CAP theorem</td><td><a class="term" href="../glossary.html#g-cap-theorem">CAP 定理</a></td><td>网络分区时，在线性一致和可用之间只能选一个（§1.4）。</td></tr>
+  <tr><td>logical clock</td><td><a class="term" href="../glossary.html#g-logical-clock">逻辑时钟</a></td><td>数事件的算法，不报时，只能比先后（§2.1）。</td></tr>
+  <tr><td>Lamport timestamp</td><td><a class="term" href="../glossary.html#g-lamport-timestamp">Lamport 时间戳</a></td><td>（计数, 节点 ID），给出和因果一致的全序（§2.1）。</td></tr>
+  <tr><td>hybrid logical clock</td><td><a class="term" href="../glossary.html#g-hybrid-logical-clock">混合逻辑时钟</a></td><td>按物理时间走，又像 Lamport 时钟那样跟着别人往前拨（§2.1）。</td></tr>
+  <tr><td>vector clock</td><td>向量时钟</td><td>每个节点一格计数，能判断两个事件是否并发（§2.1）。</td></tr>
+  <tr><td>consensus</td><td><a class="term" href="../glossary.html#g-consensus">共识</a></td><td>让多个节点就一个值达成一致，决定了就不再改（§3）。</td></tr>
+  <tr><td>FLP result</td><td>FLP 不可能性结论</td><td>节点可能崩溃时，没有确定性算法能保证共识总会结束（§3）。</td></tr>
+  <tr><td>shared log / total order broadcast</td><td><a class="term" href="../glossary.html#g-total-order-broadcast">共享日志 / 全序广播</a></td><td>多个节点都能请求追加、所有节点按同一顺序读到的日志（§3.1）。</td></tr>
+  <tr><td>consensus number</td><td>共识数</td><td>一种原子操作最多能给几个节点解决共识（§3.1）。</td></tr>
+  <tr><td>epoch number</td><td><a class="term" href="../glossary.html#g-epoch-number">任期号</a></td><td>每次选主递增的编号，同一任期里最多一个主（§3.2）。</td></tr>
+  <tr><td>coordination service</td><td><a class="term" href="../glossary.html#g-coordination-service">协调服务</a></td><td>ZooKeeper、etcd 一类，用共识存少量慢变的协调数据（§3.3）。</td></tr>
+</table></div>
+
+<h2>动手：模拟器</h2>
+<p>先猜：A 先做三件本地事件，再给 B 发一条消息；B 之前什么都没做，收到后马上给 C 发一条。B 这条消息带的计数是几？C 在收到它之前自己做了一件事，得到 (1,C)。(1,C) 比 A 发出的 (4,A) 小，C 这件事是不是发生在 A 发消息之前？猜好了再动手。</p>
+<div class="sim" id="sim-10">
+  <div class="sim-head"><span class="tag">模拟器</span><h3>逻辑时钟</h3><p class="desc">三个进程 A、B、C 做本地事件、互相发消息，消息要你手动送达。每个事件带一个 Lamport 时间戳（计数, 进程）。挑两个事件比一比：Lamport 怎么排，真实的因果关系又是什么。</p></div>
+  <div class="sim-body">
+    <div class="controls">
+      <label>进程 <select data-r="p"><option value="A">A</option><option value="B">B</option><option value="C">C</option></select></label>
+      <button data-a="local">本地事件</button>
+      <label>发给 <select data-r="to"><option value="B">B</option><option value="C">C</option><option value="A">A</option></select></label>
+      <button data-a="send">发消息</button>
+      <span class="sep"></span>
+      <label>在路上 <select data-r="fly"></select></label>
+      <button data-a="deliver">送达</button>
+      <span class="sep"></span>
+      <button data-a="random">随机走 4 步</button>
+      <button data-a="reset">重置</button>
+      <label><input data-r="max" type="checkbox" checked> 收到时把计数抬到对方的值</label>
+      <label><input data-r="vc" type="checkbox"> 显示向量时钟</label>
+      <span class="sep"></span>
+      <label>比较 <select data-r="e1"></select></label>
+      <label>和 <select data-r="e2"></select></label>
+      <button data-a="cmp">比一比</button>
+    </div>
+    <div class="stage" data-r="stage"></div>
+    <div class="narrate" data-r="say">选一个进程，点「本地事件」或「发消息」开始。</div>
+    <div class="stats" data-r="stats"></div>
+  </div>
+</div>
+<ol class="qs">
+  <li>重置。进程选 A，点三次「本地事件」；发给 B，点「发消息」；把这条消息送达。进程选 B，发给 C，点「发消息」，看它带的计数。进程选 C，点一次「本地事件」，再比较 C1 和 A4。</li>
+  <li>接着把 B 发给 C 的消息送达，让 C 再做一件本地事件，比较 A1 和 C2。然后取消「收到时把计数抬到对方的值」，重置后重复第一题的步骤，看「和因果相反的对」那个数字。</li>
+  <li>勾上「显示向量时钟」，点几次「随机走 4 步」，找一对计数不同、却是并发的事件。看它们的向量：为什么逐格比较比不出大小？</li>
+</ol>
+
+<h2>词与短语</h2>
+<p class="lede">词条按在书里出现的顺序排，按节分组；读一节之前先把这一节的过一遍，读的时候就不用停。斜体小字是原句里连续的几个词，在电子书里搜它就能找到那一句。标着「每个字都认识」的，是字面意思会把你带偏的。行话（quorum、linearizable 这类）不在这里，在上面的术语表里。</p>
+
+<h3 class="sec-head" id="s0">§0 <span class="first">Lots of things can go wrong…</span></h3>
+<div class="entry"><div class="en">notorious for</div><div class="loc" data-p="15">… are notorious for being hard to …</div><div class="zh">出了名地（难、糟）</div><div class="note">notorious 带贬义，是「臭名昭著」，和中性的 famous 不同。</div></div>
+<div class="entry trap"><div class="en">fall apart</div><div class="loc" data-p="15">… but completely fall apart when faced …</div><div class="zh">彻底垮掉</div><div class="note">不是「分开」：系统在某种故障组合下整个失灵。</div></div>
+<div class="entry trap"><div class="en">scratch the surface</div><div class="loc" data-p="16">… will only scratch the surface.</div><div class="zh">只触及皮毛</div></div>
+<div class="entry trap"><div class="en">nitty-gritty</div><div class="loc" data-p="16">… avoid the algorithmic nitty-gritty, formal …</div><div class="zh">琐碎的细节、具体的门道</div><div class="note">口语词，指一件事最具体、最繁琐的那部分。</div></div>
+<div class="entry trap"><div class="en">pointers</div><div class="loc" data-p="16">… in this chapter provide initial pointers.</div><div class="zh">线索、入门指引</div><div class="note">不是 C 语言的指针：参考文献给你「往哪里去找」的提示。</div></div>
+
+<h3 class="sec-head" id="s1">§1 <span class="first">Linearizability</span></h3>
+<div class="entry"><div class="en">incredulously</div><div class="loc" data-p="20">… Bryce incredulously hits reload on …</div><div class="zh">不敢相信地</div></div>
+
+<h3 class="sec-head" id="s1.1">§1.1 <span class="first">What Makes a System Linearizable?</span></h3>
+<div class="entry"><div class="en">flip back and forth</div><div class="loc" data-p="34">… a value flip back and forth between …</div><div class="zh">在两个值之间来回跳</div></div>
+<div class="entry"><div class="en">strictly after</div><div class="loc" data-p="38">… read occurs strictly after A’s read, …</div><div class="zh">严格在……之后（两段时间不重叠）</div><div class="note">strictly 在这里排除了「部分重叠」：B 开始时 A 已经结束。</div></div>
+<div class="entry trap"><div class="en">something else again</div><div class="loc" data-p="56">… is something else again, but we …</div><div class="zh">又是另一回事</div><div class="note">口语，意思是「别和前两个混为一谈」，书里不展开。</div></div>
+
+<h3 class="sec-head" id="s1.2">§1.2 <span class="first">Relying on Linearizability</span></h3>
+<div class="entry"><div class="en">frivolous</div><div class="loc" data-p="59">… is perhaps a frivolous example; a …</div><div class="zh">无关紧要的、不当真的</div></div>
+<div class="entry trap"><div class="en">recipe</div><div class="loc" data-p="61">… by providing higher-level recipes on top …</div><div class="zh">现成的做法、套路</div><div class="note">不是菜谱。ZooKeeper 社区就把选主、分布式锁这类用法叫 recipes。</div></div>
+<div class="entry trap"><div class="en">on the critical path</div><div class="loc" data-p="63">… are on the critical path of transaction …</div><div class="zh">在关键路径上（每次都要经过、直接决定耗时）</div></div>
+<div class="entry"><div class="en">granular</div><div class="loc" data-p="63">… at a much more granular level …</div><div class="zh">粒度更细的</div></div>
+<div class="entry trap"><div class="en">claim</div><div class="loc" data-p="65">… the user who claimed it, provided …</div><div class="zh">认领、占用</div><div class="note">不是「声称」：把一个用户名占为己有。</div></div>
+<div class="entry trap"><div class="en">provided that</div><div class="loc" data-p="65">… claimed it, provided that the username …</div><div class="zh">只要、前提是</div><div class="note">连词，和「提供」无关。</div></div>
+
+<h3 class="sec-head" id="s1.3">§1.3 <span class="first">Implementing Linearizable Systems</span></h3>
+<div class="entry trap"><div class="en">delusional</div><div class="loc" data-p="80">… if the delusional leader continues to …</div><div class="zh">自以为是（主）的</div><div class="note">本义「有妄想的」。这个节点真心相信自己还是主，其实早被换掉了。</div></div>
+<div class="entry trap"><div class="en">a different matter</div><div class="loc" data-p="81">… Cross-shard transactions are a different matter …</div><div class="zh">另当别论</div></div>
+<div class="entry trap"><div class="en">not quite true</div><div class="loc" data-p="87">… strong consistency, this is not quite true.</div><div class="zh">（其实）不对</div><div class="note">往轻里说：not quite 字面是「不完全」，作者的意思是这个说法站不住。</div></div>
+<div class="entry"><div class="en">at the cost of</div><div class="loc" data-p="92">… at the cost of reduced performance.</div><div class="zh">以……为代价</div></div>
+
+<h3 class="sec-head" id="s1.4">§1.4 <span class="first">The Cost of Linearizability</span></h3>
+<div class="entry trap"><div class="en">deserve credit for</div><div class="loc" data-p="107">… CAP deserves credit for this culture …</div><div class="zh">在……上功不可没</div><div class="note">先给一句肯定，后面再批评，是作者常用的写法。</div></div>
+<div class="entry"><div class="en">a burst of</div><div class="loc" data-p="107">… a burst of new database technologies …</div><div class="zh">一阵、一波（集中涌现的）</div></div>
+<div class="entry"><div class="en">superseded by</div><div class="loc" data-p="110">… has now been superseded by more …</div><div class="zh">被……取代</div></div>
+<div class="entry trap"><div class="en">of mostly historical interest</div><div class="loc" data-p="110">… is of mostly historical interest today.</div><div class="zh">如今基本只有历史意义</div><div class="note">客气的否定：言下之意是设计系统时不必再拿它当依据。</div></div>
+<div class="entry"><div class="en">idiosyncratic</div><div class="loc" data-p="113">… CAP’s idiosyncratic definition of availability.</div><div class="zh">独特的、和通常理解不一样的</div></div>
+<div class="entry trap"><div class="en">dwell on</div><div class="loc" data-p="114">… best not to dwell on it.</div><div class="zh">纠缠于、老惦记着</div><div class="note">dwell 本义居住，dwell on 是在一个话题上停留太久。</div></div>
+
+<h3 class="sec-head" id="s2">§2 <span class="first">ID Generators and Logical Clocks</span></h3>
+<div class="entry"><div class="en">ahead of</div><div class="loc" data-p="130">… might have been ahead of the other.</div><div class="zh">（计数）跑在前面</div></div>
+<div class="entry trap"><div class="en">run low</div><div class="loc" data-p="132">… sequence numbers begins to run low.</div><div class="zh">快用完了</div><div class="note">不是「跑得低」：supply runs low 是存货见底。</div></div>
+<div class="entry"><div class="en">vanishingly rare</div><div class="loc" data-p="137">… that collisions are vanishingly rare …</div><div class="zh">罕见到几乎为零</div></div>
+<div class="entry trap"><div class="en">at best</div><div class="loc" data-p="138">… can provide at best an approximate ordering.</div><div class="zh">充其量、最好也只能</div></div>
+
+<h3 class="sec-head" id="s2.1">§2.1 <span class="first">Logical Clocks</span></h3>
+<div class="entry"><div class="en">lexicographic</div><div class="loc" data-p="153">… using the usual lexicographic string comparison.</div><div class="zh">按字典序的</div></div>
+<div class="entry trap"><div class="en">wildly different</div><div class="loc" data-p="156">… could have wildly different counter values.</div><div class="zh">相差极大</div><div class="note">wildly 在这里只是加强语气，没有「野蛮」的意思。</div></div>
+<div class="entry trap"><div class="en">arbitrarily</div><div class="loc" data-p="161">… these algorithms order them arbitrarily.</div><div class="zh">随便地（排一个顺序）</div><div class="note">不是「武断地」：没有依据，排成哪样都行。</div></div>
+
+<h3 class="sec-head" id="s2.2">§2.2 <span class="first">Linearizable ID Generators</span></h3>
+<div class="entry trap"><div class="en">on the upside</div><div class="loc" data-p="171">… On the upside, the ID generator’s …</div><div class="zh">好的一面是</div></div>
+<div class="entry trap"><div class="en">grind to a halt</div><div class="loc" data-p="176">… this system would grind to a halt …</div><div class="zh">卡死、停摆</div><div class="note">像齿轮磨着磨着停下来。§3.3 又出现一次。</div></div>
+
+<h3 class="sec-head" id="s3">§3 <span class="first">Consensus</span></h3>
+<div class="entry trap"><div class="en">get right</div><div class="loc" data-p="182">… infamously difficult to get right, and …</div><div class="zh">做对</div><div class="note">get it right / get it wrong 是「做对 / 做错」，不是「拿到」。</div></div>
+<div class="entry"><div class="en">tackle</div><div class="loc" data-p="182">… finally ready to tackle the consensus …</div><div class="zh">着手解决</div></div>
+<div class="entry trap"><div class="en">here we are</div><div class="loc" data-p="185">… Yet, here we are, discussing algorithms …</div><div class="zh">可我们偏偏在这儿（讨论它）</div><div class="note">作者的自嘲口吻：既然证明了做不到，这一章怎么还在讲？</div></div>
+
+<h3 class="sec-head" id="s3.1">§3.1 <span class="first">The Many Faces of Consensus</span></h3>
+<div class="entry trap"><div class="en">lump together</div><div class="loc" data-p="193">… why we can lump all these things …</div><div class="zh">归到一起、一并看待</div></div>
+<div class="entry trap"><div class="en">dictator</div><div class="loc" data-p="208">… one node to be the “dictator,” and …</div><div class="zh">独裁者（一个人说了算的节点）</div><div class="note">比喻：指定一个节点包办所有决定，最简单，但它一挂就没人能决定了。</div></div>
+<div class="entry trap"><div class="en">sit around</div><div class="loc" data-p="209">… cannot simply sit around and do …</div><div class="zh">干坐着（什么也不做）</div></div>
+<div class="entry"><div class="en">buried under 30 feet of mud</div><div class="loc" data-p="210">… is buried under 30 feet of mud …</div><div class="zh">埋在 30 英尺深的泥里</div><div class="note">作者的玩笑，强调「那个节点永远回不来了」。30 英尺约 9 米。</div></div>
+<div class="entry trap"><div class="en">left hanging</div><div class="loc" data-p="240">… the other nodes are left hanging, unable …</div><div class="zh">被晾在那儿、悬而未决</div></div>
+<div class="entry trap"><div class="en">may yet</div><div class="loc" data-p="240">… that read 0 may yet come back …</div><div class="zh">仍有可能（日后）</div><div class="note">yet 在这里不是「但是」，是「到头来还可能」。</div></div>
+
+<h3 class="sec-head" id="s3.2">§3.2 <span class="first">Consensus in Practice</span></h3>
+<div class="entry trap"><div class="en">right out of the box</div><div class="loc" data-p="260">… provide shared logs right out of the box.</div><div class="zh">开箱即有、自带</div></div>
+<div class="entry"><div class="en">conundrum</div><div class="loc" data-p="270">… break out of this conundrum?</div><div class="zh">难题、两难的死结</div></div>
+<div class="entry trap"><div class="en">after all</div><div class="loc" data-p="272">… leader wasn’t dead after all), then …</div><div class="zh">原来（其实）</div><div class="note">不是「毕竟」：和预想相反，旧主其实没死。</div></div>
+<div class="entry trap"><div class="en">the devil is in the details</div><div class="loc" data-p="277">… However, the devil is in the details, …</div><div class="zh">难就难在细节</div></div>
+<div class="entry trap"><div class="en">honor</div><div class="loc" data-p="277">… new leader honors any log entries …</div><div class="zh">承认并保留（旧主已经写下的条目）</div><div class="note">honor 作动词是「兑现、遵守」，honor a contract 是履行合同。</div></div>
+<div class="entry trap"><div class="en">on thin ice</div><div class="loc" data-p="280">… but you are on thin ice, since …</div><div class="zh">如履薄冰、处境危险</div></div>
+<div class="entry"><div class="en">lurk</div><div class="loc" data-p="285">… other places where bugs can lurk …</div><div class="zh">潜伏、藏着</div></div>
+<div class="entry trap"><div class="en">bounce between</div><div class="loc" data-p="288">… leadership continually bounces between two nodes, …</div><div class="zh">在……之间来回换</div><div class="note">bounce 本义弹跳，这里是主的位置在两个节点间反复易手。</div></div>
+
+<h3 class="sec-head" id="s3.3">§3.3 <span class="first">Coordination Services</span></h3>
+<div class="entry"><div class="en">judicious</div><div class="loc" data-p="305">… by judicious use of atomic operations, …</div><div class="zh">审慎得当的</div></div>
+<div class="entry trap"><div class="en">spring up</div><div class="loc" data-p="305">… that have sprung up to provide …</div><div class="zh">纷纷出现</div><div class="note">spring 在这里是「冒出来」，过去分词 sprung。</div></div>
+<div class="entry trap"><div class="en">overkill</div><div class="loc" data-p="310">… for service discovery is often overkill.</div><div class="zh">大材小用、用力过猛</div></div>
+
+<h3 class="sec-head" id="s4">§4 <span class="first">Summary</span></h3>
+<div class="entry trap"><div class="en">vested in</div><div class="loc" data-p="329">… decisions is vested in the leader, …</div><div class="zh">（权力）归于、交给</div><div class="note">法律和公文里的说法：权力被授予某人。</div></div>
+
+<div class="gate"><b>到这里先停下，去读原书</b><p>下面是读完再看的：你的预测对不对、几道换成你来选的判断题、值得细读的句子和理解检查。先看了，读书时就只是在找答案。</p></div>
+
+<h2>读完：回到你的预测</h2>
+<div class="payoff" data-bet="10-a"><div class="mine"></div>
+<p>书里的答案是第四项（§1.3）。写入是分别发往三个副本的，到达的时间有先有后。甲读的两个副本里有一个已经是 1，按时间戳取新的，读到 1；乙读的另外两个恰好都还没收到，读到 0。整个过程没有任何故障，法定人数的条件也满足，但「甲读完以后才开始的乙读到了更旧的值」，违反了线性一致。书里说要补救，读者在返回前得同步做读修复，写者在写之前也得先从法定人数个副本读到最新的时间戳；即使这样，CAS 也做不出来。想一想：如果每个读者都在返回之前把读到的最新值写回到两个副本上，乙还会读到 0 吗？</p></div>
+<div class="payoff" data-bet="10-b"><div class="mine"></div>
+<p>书里的答案是第三项（§2.1）。Lamport 时间戳和因果一致：如果 q 先于 p，q 的时间戳一定更小；现在 q 更大，所以 q 不可能先于 p。但反过来不成立，时间戳小不代表先发生，两件互不知情的事照样被排出先后。要分清「先于」和「并发」，得用向量时钟。上面的模拟器里，「计数不同却并发」的那几对就是例子。想一想：如果两个时间戳是 (4, A) 和 (4, C)，能得出什么？</p></div>
+
+<h2>判断题：换成你来选</h2>
+<p class="lede">场景都是本站编的。先选，再看解释；解释里写了对应的节号，拿不准就回原书看那一节。</p>
+<p class="quiz-score"></p>
+<div class="mcq" data-answer="1"><div class="q">这算哪一种保证被破坏了？<span class="sec">§1.1</span></div>
+  <p class="ctx">场景：一个分布式账务库宣称提供「可串行化」。运营在 10:00:05 收到了一笔调账事务提交成功的响应；10:00:07 另一个只读事务查这个账户的余额，看到的是调账之前的数。</p>
+  <div class="opts"><button>违反了可串行化：后执行的事务没看到先提交的事务</button><button>没违反可串行化，但不满足线性一致；想排除这种情况要的是严格可串行化</button><button>这是写偏斜：两个事务各自读了旧数据</button><button>这是脏读：读到了还没提交的数据</button></div>
+  <div class="explain"><p>可串行化只要求事务的效果等同于某一种串行顺序，这个顺序可以和真实时间不一致，把只读事务排在调账之前也合法，所以读到旧值不算违规。要求「先完成的操作一定被后开始的操作看到」的是线性一致的新近性保证，两者都要叫严格可串行化。写偏斜涉及两个事务基于旧前提各写一笔；脏读是读到未提交的数据，这里读到的是已提交的旧值。</p></div></div>
+<div class="mcq" data-answer="2"><div class="q">两地部署该选哪种复制？<span class="sec">§1.3</span><span class="sec">§1.4</span></div>
+  <p class="ctx">场景：一款协作文档应用部署在东京和法兰克福两个机房，两地之间的线路每月会断几次，每次几分钟。断线时两地的用户都要能继续编辑，事后合并即可。</p>
+  <div class="opts"><button>单主复制，所有读写都发往主所在的机房</button><button>跨两地部署一个五节点的共识集群，东京三个、法兰克福两个</button><button>多主复制，每个机房都接受写入，断线时各自排队，恢复后交换并合并</button><button>无主复制，配 w + r &gt; n 的法定人数，这样既线性一致又不怕断线</button></div>
+  <div class="explain"><p>需求是断线时两边都能写，这正是不要线性一致的场合：多主复制让每个机房各自处理写入，恢复后再交换。单主和共识集群在断线时，联系不上主或者处在少数派一侧的机房就写不了（法兰克福那两个节点会停下）。无主加法定人数既不能保证线性一致，在断线、凑不够 w 个副本时也会拒绝写入。</p></div></div>
+<div class="mcq" data-answer="3"><div class="q">最直接的修法是哪一个？<span class="sec">§2.1</span><span class="sec">§2.2</span></div>
+  <p class="ctx">场景：商品信息和价格存在两个分片上，各自用混合逻辑时钟给写入打时间戳。运营甲先把一件商品「下架」（分片 1），运营乙在聊天群里看到后，把它的价格改成内部测试价 0.01 元（分片 2）。结果有顾客用快照读看到这件商品仍在架上、价格 0.01 元，下了单。</p>
+  <div class="opts"><button>把混合逻辑时钟换成向量时钟</button><button>把 NTP 同步的频率调高，减少时钟偏差</button><button>让顾客的快照读用一个更新的时间戳</button><button>两个分片的写入都从一个线性一致的发号器（单独的时间戳服务）领时间戳</button></div>
+  <div class="explain"><p>分片 2 从没见过分片 1 的时间戳，它的时钟可能稍慢，于是后发生的改价拿到了更小的时间戳，快照恰好落在两次写之间。因果信息走的是聊天群，系统看不到，逻辑时钟管不着。线性一致的发号器保证「先完成的请求号更小」，不管两边有没有通信，书里 TiDB 的时间戳预言机就是这么做的。向量时钟能告诉你两次写并发，却不能把它们排对；调高 NTP 只能缩小、不能消除误差；快照时间戳选得再新，下一次也可能落在两次写之间。</p></div></div>
+<div class="mcq" data-answer="0"><div class="q">这个主备切换脚本哪里会先出事？<span class="sec">§3.2</span></div>
+  <p class="ctx">场景：团队自己写了一个主备切换脚本：备库 3 秒收不到主库的心跳，就把自己提升为主。复制是异步的，没有用任何共识算法或协调服务。</p>
+  <div class="opts"><button>主库只是一次 4 秒的停顿，醒来后继续接受写入：两个主同时写，已确认的写也可能丢</button><button>3 秒太长，故障恢复太慢，用户会看到报错</button><button>心跳太频繁，占满了两库之间的带宽</button><button>备库的时钟比主库快，心跳的时间判断会出错</button></div>
+  <div class="explain"><p>只靠超时判断主死了，又没有任期号或防护令牌，停顿后醒来的旧主不知道自己已被替换，两个主同时接受写入，就是脑裂；异步复制下，旧主上已确认但还没复制过去的写也会丢。书里的说法是：做自动切换却没用经过验证的共识算法，多半不安全。超时长短是调参问题；心跳的带宽可以忽略；心跳超时只要在备库本机用单调时钟计时，就不依赖两台机器的时钟同步（第 9 章 §3.1）。</p></div></div>
+<div class="mcq" data-answer="2"><div class="q">分片分配怎么做最合适？<span class="sec">§3.3</span></div>
+  <p class="ctx">场景：一个对象存储系统有 300 台存储节点、2000 个分片，节点会加入、退出、宕机，需要决定每个分片由哪台节点负责。同事提议在全部 300 台节点上直接跑 Raft，让它们一起投票决定分配。</p>
+  <div class="opts"><button>好主意：参与投票的节点越多，能容忍的故障越多，也越快</button><button>可以，但把「多数」改成三分之一，选举会快很多</button><button>把分配信息放进一个三到五节点的协调服务，存储节点用临时节点登记自己、订阅变更</button><button>不需要共识：每个节点按自己的时钟判断谁超时了，各自接管</button></div>
+  <div class="explain"><p>共识的每次操作都要和多数节点通信，节点越多越慢；书里说在几千个节点上跑共识效率极低，更好的做法是把共识「外包」给少数几台跑协调服务的机器。分片分配变化慢、数据量小，正适合协调服务，临时节点和变更通知正好用来发现节点的加入和消失。把多数降成三分之一，两个不重叠的少数派会各自做出决定；各自按超时接管则会出现两个节点同时认领一个分片。</p></div></div>
+
+<h2>和本站其他书对照</h2>
+<div class="who">
+  <div><b>锁、比较并交换和 ticket 锁</b><span class="en">OSTEP 第 28 章</span>§3.1 说 CAS 和共识等价，而 fetch-and-add 只能给两个节点解决共识。这两个原子操作在单机上就是 CPU 指令，OSTEP 那一页用它们写了自旋锁和按号排队的 ticket 锁，可以先看它们在一台机器上怎么用。<a class="go" href="/ostep/chapters/28-locks.html">去那一页 →</a></div>
+  <div><b>多处理器的缓存一致性</b><span class="en">OSTEP 第 10 章</span>§1.4 说多核 CPU 的内存也不是线性一致的：每个核有自己的缓存，数据有好几份副本。OSTEP 那一页从调度的角度讲了多个缓存里副本不一致的问题和总线窥探，可以对照着看「一台机器里也有复制」。<a class="go" href="/ostep/chapters/10-multicpu.html">去那一页 →</a></div>
+</div>
+
+<h2>值得停下来的句子</h2>
+<blockquote class="quote">Linearizable systems tend to be higher latency—and this is true all the time, not only during a network fault.<cite>— §1.4。本站译：线性一致的系统往往延迟更高，而且一直如此，不只是在网络出故障的时候。</cite></blockquote>
+<p>CAP 让人以为线性一致的代价只在网络分区时才付，平时白拿。这句话把账算对了：每次读写都要确认自己看到的是最新的，就要等网络往返，而延迟的上限又说不准。多核 CPU 放弃线性一致、很多分布式数据库不提供它，理由都是性能。读到 §3.2 共识的每一步都要多数派点头时，可以回头再看这句。</p>
+<blockquote class="quote">Consensus is essentially “single-leader replication done right,” with automatic failover on leader failure<cite>— §3.2。本站译：共识本质上就是「做对了的单主复制」，主挂了能自动切换。</cite></blockquote>
+<p>§3.1 把共识讲得很抽象，五种问题互相转化；这句话把它拉回读者熟悉的东西。第 6 章的单主复制最难的就是故障切换：脑裂、丢失已确认的写。共识算法没有发明新的复制方式，而是把这一步做到在第 9 章那些故障下也不出错。</p>
+
+<h2>检查一下理解</h2>
+<details class="check"><summary>1.（§1.1）和写在时间上重叠的读，读到旧值或新值都可以。线性一致还额外要求了什么？</summary><p>一旦有任何一个读返回了新值，此后开始的所有读，不管来自哪个客户端，都必须返回新值（直到它再被覆盖）。值不能在新旧之间来回跳，就像存在某一刻它原子地变了。</p></details>
+<details class="check"><summary>2.（§1.2）为什么硬性的唯一约束需要线性一致，外键约束却不需要？</summary><p>两个人同时注册同一个用户名，必须由一个大家都认的最新值来判谁先占到，这和拿锁、做一次 CAS 是一回事。书里说外键、属性约束这类不需要线性一致也能实现。</p></details>
+<details class="check"><summary>3.（§1.3）用时钟时间戳做 LWW 的无主数据库，为什么几乎肯定不是线性一致的？</summary><p>时钟有偏差，时间戳的大小和事件真实的先后可能对不上，后写的值可能因为时间戳更小被丢掉。所以即使用了法定人数，书里也建议默认它不提供线性一致。</p></details>
+<details class="check"><summary>4.（§1.4）书里为什么说用 CAP 解释多核 CPU 内存不线性一致是说不通的？</summary><p>一台机器内部的通信被当作可靠的，一个核和其余部分断开后也不指望它还能正常工作，根本谈不上「分区时选可用」。放弃线性一致是为了性能：缓存比主存快得多。</p></details>
+<details class="check"><summary>5.（§2.1）Lamport 时间戳为什么要带上节点 ID？</summary><p>两个节点可能产生相同的计数。带上节点 ID，计数相同时按节点 ID 比，每个时间戳都唯一，任意两个都能比出大小，构成一个全序。</p></details>
+<details class="check"><summary>6.（§2.2）有了线性一致的时间戳，「时间戳最小的赢」为什么仍然做不成容错的锁？</summary><p>一个节点要确认自己的时间戳最小，必须听到所有可能参与竞争的节点的回音。只要有一个节点挂了或联系不上，就没法确定它的时间戳不更小，系统只能停着等。</p></details>
+<details class="check"><summary>7.（§3.1）用 fetch-and-add 做共识，拿到 0 的节点赢。问题出在哪？为什么两个节点时又可以？</summary><p>其他节点只知道自己输了，不知道谁赢了；赢家如果在通知大家之前挂了，其余节点无法决定，也不能改选别人，因为赢家可能回来。只有两个节点时，可以先交换各自的提议，拿到 1 的那个就知道赢的是对方。</p></details>
+<details class="check"><summary>8.（§3.2）共识算法里，选主和追加日志的两次投票，为什么要求法定人数重叠？</summary><p>重叠保证追加日志的投票里至少有一个节点参加过最近一次成功的选举。如果出现了任期更大的主，旧主拉票时一定会从这个节点那里发现，追加就不会成功。</p></details>
+<p>用一句话说这一章（写给一个没读过的朋友）：</p>
+<textarea class="note" data-key="10-oneline" placeholder="比如：……"></textarea>
+
+<h2>精彩回顾</h2>
+<p class="recall-line"><b>一句话：</b>共识让一组会坏的机器像一台不会坏的单主机器那样做决定，代价是每一步都要多数节点点头。</p>
+<div class="recall">
+  <div class="item"><b>读到新值，就回不去了</b><p>和写重叠的读新旧皆可；但只要有人读到了新值，之后开始的读都只能是新值。线性一致是新近性保证，只管单个对象。</p><span class="sec">§1.1</span></div>
+  <div class="item"><b>法定人数也会读到旧值</b><p>w + r &gt; n，又没有任何故障，和写重叠的两次读仍可能一新一旧。要补救得同步读修复，CAS 仍然做不到。</p><span class="sec">§1.3</span></div>
+  <div class="item"><b>平时就在付的代价</b><p>放弃线性一致多半是为了快，不是为了容错。它的响应时间至少和网络延迟的不确定性成正比，不只在断网时慢。</p><span class="sec">§1.4</span></div>
+  <div class="item"><b>计数小不等于先发生</b><p>Lamport 时间戳只保证「先发生的更小」。两件互不知情的事也会被随手排个先后，要分出并发得用向量时钟。</p><span class="sec">§2.1</span></div>
+  <div class="item"><b>没交流过，就排不对</b><p>两个库各用逻辑时钟，彼此没见过对方的时间戳，后发生的写可能拿到更小的号。线性一致的发号器才能堵住。</p><span class="sec">§2.2</span></div>
+  <div class="item"><b>赢家挂了，输家悬着</b><p>fetch-and-add 里拿到 0 的赢，其余的只知道自己输了。赢家没来得及通知就挂，大家既不能决定，也不能改选。</p><span class="sec">§3.1</span></div>
+  <div class="item"><b>每个任期只有一个主</b><p>共识不保证任何时刻只有一个主，只保证同一任期里最多一个。追加日志前再拉一次多数票，过期的主就会被发现。</p><span class="sec">§3.2</span></div>
+  <div class="item"><b>共识外包给三五台机器</b><p>几千个分片不必都跑共识，把慢变的分配信息交给三到五台机器上的协调服务。服务发现通常连线性一致都不需要。</p><span class="sec">§3.3</span></div>
+</div>
+
+</main>
+<script>
+(() => {
+  const root = document.getElementById("sim-10"), h = window.DD.h;
+  const $ = (r) => root.querySelector(`[data-r="${r}"]`);
+  const P = ["A", "B", "C"];
+  let S;
+  // 带种子的伪随机数：「重置」之后同样的操作得到同样的结果
+  const rng = (seed) => () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  function reset() {
+    S = { c: { A: 0, B: 0, C: 0 }, vc: { A: [0, 0, 0], B: [0, 0, 0], C: [0, 0, 0] }, ev: [], lane: { A: [], B: [], C: [] }, fly: [], nm: 0, rnd: rng(7), pick: null, u1: null, u2: null };
+  }
+  const say = (t) => { $("say").textContent = t; };
+  const ts = (e) => `(${e.L},${e.p})`;
+  // 真实的因果：向量逐格不大于，且不是同一个事件
+  const hb = (a, b) => a !== b && a.vc.every((x, i) => x <= b.vc[i]);
+  // Lamport 顺序：先比计数，再比进程名
+  const lt = (a, b) => a.L < b.L || (a.L === b.L && a.p < b.p);
+  function stamp(p, kind, to) {
+    S.c[p]++;
+    const v = S.vc[p].slice(); v[P.indexOf(p)]++; S.vc[p] = v;
+    const e = { id: p + (S.lane[p].filter((x) => !x.recv).length + 1), p, L: S.c[p], vc: v, kind, to };
+    S.ev.push(e); S.lane[p].push(e);
+    return e;
+  }
+  function local(p) {
+    const e = stamp(p, "local");
+    return `${p} 做了一件本地事件 ${e.id}：计数加一，时间戳 ${ts(e)}。`;
+  }
+  function send(p, to) {
+    if (p === to) return "发给自己没有意义，换一个收件的进程。";
+    const e = stamp(p, "send", to);
+    S.nm++; S.fly.push({ id: `m${S.nm}`, from: p, to, L: e.L, vc: e.vc, ev: e.id });
+    return `${p} 发消息给 ${to}（事件 ${e.id}）：计数加一，消息带上 ${ts(e)}。消息还在路上，要你点「送达」。`;
+  }
+  function deliver(id) {
+    const i = S.fly.findIndex((m) => m.id === id);
+    if (i < 0) return "没有在路上的消息，先发一条。";
+    const m = S.fly.splice(i, 1)[0], q = m.to, before = S.c[q], on = $("max").checked;
+    if (on) S.c[q] = Math.max(before, m.L);
+    S.vc[q] = S.vc[q].map((x, k) => Math.max(x, m.vc[k]));
+    S.lane[q].push({ recv: true, from: m.from, L: m.L, before, after: S.c[q] });
+    const why = !on ? `规则关掉了：计数仍是 ${before}，没理会消息里的 ${m.L}。` : m.L > before ? `消息里的 ${m.L} 比自己的 ${before} 大，计数抬到 ${m.L}。` : `消息里的 ${m.L} 不比自己的 ${before} 大，计数不动。`;
+    return `${q} 收到 ${m.from} 的消息（来自 ${m.ev}）。${why}收到本身不产生时间戳，${q} 的下一个事件从 ${S.c[q] + 1} 起。`;
+  }
+  function compare() {
+    const a = S.ev.find((e) => e.id === $("e1").value), b = S.ev.find((e) => e.id === $("e2").value);
+    if (!a || !b) return "先做几件事，再从两个下拉框里各挑一个事件。";
+    S.pick = [a.id, b.id];
+    if (a === b) return "两边选的是同一个事件，换一个再比。";
+    const [x, y] = lt(a, b) ? [a, b] : [b, a];
+    const order = ` Lamport 顺序：${x.id} ${ts(x)} 排在 ${y.id} ${ts(y)} 前面。`;
+    if (hb(a, b) || hb(b, a)) {
+      const [f, s] = hb(a, b) ? [a, b] : [b, a];
+      const how = f.p === s.p ? "同一个进程里的先后" : `沿着消息链能从 ${f.id} 追到 ${s.id}`;
+      return `${f.id} 先于 ${s.id} 发生（${how}）。` + order + (lt(f, s) ? " 和因果一致，这正是 Lamport 时钟保证的。" : " 可它和因果反了：收到消息时没有把计数抬上去。");
+    }
+    return `${a.id} 和 ${b.id} 是并发的：没有消息链把它们连起来，谁也不知道谁。` + order + (a.L === b.L ? " 计数相同，只好比进程名，这个先后是随手定的。" : " 计数不同只是碰巧，大小说明不了谁先发生。");
+  }
+  function lane(label, cells) {
+    return h("div", { class: "lane" }, h("span", { class: "lbl" }, label), ...cells);
+  }
+  // 下拉框按当前状态重建；读者自己挑过的事件保留，没挑过就用默认（第一个 / 最新一个）
+  function fill(sel, items, want, dflt) {
+    sel.textContent = "";
+    if (!items.length) { sel.append(h("option", { value: "" }, "（没有）")); return; }
+    for (const [v, t] of items) sel.append(h("option", { value: v }, t));
+    sel.value = items.some(([v]) => v === want) ? want : dflt;
+  }
+  function render() {
+    const showVc = $("vc").checked, pick = S.pick || [];
+    const st = $("stage"); st.textContent = "";
+    for (const p of P) {
+      const cells = S.lane[p].map((x) => x.recv
+        ? h("span", { class: "pill" }, `收到 ${x.from} 的 ${x.L}：${x.before}→${x.after}`)
+        : h("span", { class: `cell ${pick.includes(x.id) ? "ok" : x.kind === "send" ? "on" : ""}` }, `${x.id} ${ts(x)}${x.kind === "send" ? " →" + x.to : ""}${showVc ? " [" + x.vc.join(",") + "]" : ""}`));
+      st.append(lane(`进程 ${p} · 计数 ${S.c[p]}`, cells.length ? cells : [h("span", { class: "pill" }, "还没有事件")]));
+    }
+    st.append(lane("在路上", S.fly.length ? S.fly.map((m) => h("span", { class: "cell" }, `${m.from}→${m.to} 带 ${m.L}`)) : [h("span", { class: "pill" }, "没有")]));
+    fill($("fly"), S.fly.map((m) => [m.id, `${m.from}→${m.to}（${m.ev}）`]), $("fly").value, S.fly.length ? S.fly[0].id : "");
+    const evs = S.ev.map((e) => [e.id, `${e.id} ${ts(e)}`]);
+    fill($("e1"), evs, S.u1, evs.length ? evs[0][0] : "");
+    fill($("e2"), evs, S.u2, evs.length ? evs[evs.length - 1][0] : "");
+    let ord = 0, conc = 0, diff = 0, bad = 0;
+    for (let i = 0; i < S.ev.length; i++) for (let j = i + 1; j < S.ev.length; j++) {
+      const a = S.ev[i], b = S.ev[j];
+      if (hb(a, b) || hb(b, a)) { ord++; const [f, s] = hb(a, b) ? [a, b] : [b, a]; if (!lt(f, s)) bad++; }
+      else { conc++; if (a.L !== b.L) diff++; }
+    }
+    const stats = $("stats"); stats.textContent = "";
+    for (const [v, l] of [[S.ev.length, "事件数"], [S.fly.length, "在路上的消息"], [ord, "有先后的事件对"], [conc, "并发的事件对"], [diff, "其中计数不同的"], [bad, "和因果相反的对"]])
+      stats.append(h("div", { class: "stat" }, h("div", { class: "v" }, String(v)), h("div", { class: "l" }, l)));
+  }
+  const act = {
+    local: () => local($("p").value),
+    send: () => send($("p").value, $("to").value),
+    deliver: () => deliver($("fly").value),
+    cmp: () => compare(),
+    random: () => {
+      const out = [];
+      for (let i = 0; i < 4; i++) {
+        const r = S.rnd(), p = P[Math.floor(S.rnd() * 3)];
+        if (S.fly.length && r < 0.35) { const m = S.fly[Math.floor(S.rnd() * S.fly.length)]; deliver(m.id); out.push(`${m.to} 收到 ${m.from} 的 ${m.L}`); }
+        else if (r < 0.7) { const to = P[(P.indexOf(p) + 1 + Math.floor(S.rnd() * 2)) % 3]; send(p, to); out.push(`${p} 发给 ${to} ${ts(S.ev[S.ev.length - 1])}`); }
+        else { local(p); out.push(`${p} 本地事件 ${ts(S.ev[S.ev.length - 1])}`); }
+      }
+      return `随机走了 4 步：${out.join("；")}。`;
+    },
+    reset: () => { reset(); return "清空了。选一个进程，点「本地事件」或「发消息」开始。"; },
+  };
+  root.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-a]"); if (!b) return;
+    if (b.dataset.a !== "cmp") S.pick = null;
+    say(act[b.dataset.a]()); render();
+  });
+  $("e1").addEventListener("change", () => { S.u1 = $("e1").value; S.pick = null; render(); });
+  $("e2").addEventListener("change", () => { S.u2 = $("e2").value; S.pick = null; render(); });
+  $("max").addEventListener("change", () => { say($("max").checked ? "规则打开：收到消息时，如果对方的计数更大，就把自己的抬上去。" : "规则关掉：收到消息时不理会对方的计数。之后的时间戳可能和因果反过来。"); render(); });
+  $("vc").addEventListener("change", render);
+  reset(); render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 12 章 · 流处理 · DDIA 导读</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/chapters.js"></script>
+<script src="../assets/sections.js"></script>
+<script src="../assets/dd.js"></script>
+</head>
+<body data-chapter="12">
+<main>
+
+<h2>这一章在做什么</h2>
+<div class="gist"><p>第 11 章的批处理有个前提：输入有头有尾，读完了才出结果。现实里的数据一直在来，没有「到齐」的那一刻。这一章讲怎么对付这种数据。先看事件怎么传：传统消息代理读完就删，日志式代理把消息留在盘上、按偏移量读。再看数据库和流的关系：变更数据捕获和事件溯源，把数据库的每一次写变成一条可以重放的流。最后是流处理本身：时间和窗口、流的连接，以及永远跑不完的作业怎样做到「恰好一次」。</p></div>
+<figure class="fig"><img src="../assets/img/12-ticker.jpg" alt="玻璃罩里的一台老式股票报价机：上方一个黄铜轮子，一条细纸带从机器里绕出来，黑色底座上印着 Gold &amp; Stock Telegraph Co. Universal Printer 和 Edison’s Patent" loading="lazy">
+<figcaption>一台股票报价机（stock ticker），底座上写着 Gold &amp; Stock Telegraph Co.、Universal Printer、Edison’s Patent。它是一种专用的电报接收机，线路上传来的行情一条接一条打在纸带上，照片里能看到纸带从机器里绕出来。这正是这一章说的「流」：数据随时间一点点到来，永远不会有「全部到齐」的时候。§1.1 提到，今天金融行情这类对延迟敏感的流，常用 UDP 组播直接发给接收方。<span class="src">Jaclyn Nash，公有领域，维基共享资源</span></figcaption></figure>
+
+<h2>读之前：先预测</h2>
+<p>这一章紧接着第 11 章：批处理的输入有界，流处理把这个前提拿掉。它把前面几章的零件重新串了一遍：第 4 章的日志结构和合并变成了消息代理的存储和日志压缩，第 6 章的复制日志变成了变更数据捕获，第 8 章的「恰好一次」和第 10 章的共享日志在这里换了个场合再出现。第 13 章接着这一章，讨论怎样用流把各种专门的数据系统接在一起。</p>
+
+<div class="bet" data-key="12-a">
+  <div class="q">一个平台按处理时间（流处理器自己的时钟）统计每分钟收到多少条充电桩心跳，平时稳定在每分钟 1200 条左右。某天一个地区的网关断网 3 分钟，那个地区的心跳（约占三分之一）全攒在网关里；网络恢复后，这批心跳在 20 秒内全部发了出来。监控图上会出现什么？</div>
+  <div class="opts">
+    <button>一条平线：心跳一条没丢，最后都到了，每分钟的数字不受影响</button>
+    <button>断网的 3 分钟掉到 800 左右，恢复后那一分钟冲到 2400 左右</button>
+    <button>断网的 3 分钟掉到 800 左右，然后回到 1200：补来的心跳会被算回它们原来那几分钟</button>
+    <button>断网的 3 分钟掉到零，然后回到 1200</button>
+  </div>
+  <textarea class="note" data-key="12-a-bet" placeholder="你为什么这么猜？一两句就行"></textarea>
+</div>
+
+<div class="bet" data-key="12-b">
+  <div class="q">一个消费者从日志式消息代理的一个分区里读订单事件，每处理完一批才把偏移量记下来一次。它最后一次记下的偏移量是 1000，之后又处理了 1000 到 1049 这 50 条（每条都往数据库里给对应商家的余额加钱），还没来得及记偏移量就崩溃了。同组的另一个消费者接手这个分区。会发生什么？</div>
+  <div class="opts">
+    <button>新消费者从 1050 接着读：代理知道上一个消费者实际处理到了哪</button>
+    <button>1000 到 1049 这 50 条丢了：上一个消费者已经把它们读走，日志里没有了</button>
+    <button>新消费者从 1000 开始读，这 50 条再处理一遍，这些商家的余额被加了两次</button>
+    <button>代理逐条记着确认，只重发那几条没确认的</button>
+  </div>
+  <textarea class="note" data-key="12-b-bet" placeholder="你为什么这么猜？"></textarea>
+</div>
+
+<div class="crux"><p>数据永远不会到齐，处理也永远不会做完。批处理靠「失败了就整个重跑、半截输出扔掉」得到可靠的结果，这一招在流上用不了。那么事件该怎么传、怎么存、怎么算，才能让结果像没出过故障一样可信？</p></div>
+<ol class="qs">
+  <li>传统消息代理和日志式消息代理，「读一条消息」这件事有什么根本不同？这个不同带来了哪些好处和限制？<span class="sec">§1.1</span><span class="sec">§1.2</span></li>
+  <li>应用同时写数据库和搜索索引，为什么没有任何报错，两边也会永远对不上？<span class="sec">§2.1</span><span class="sec">§2.2</span></li>
+  <li>按事件发生的时间分窗口统计，什么时候才能宣布一个窗口「结束了」？<span class="sec">§3.2</span></li>
+  <li>一个跑了几年的作业不能「失败了从头重跑」，它靠什么做到恰好一次的效果？<span class="sec">§3.4</span></li>
+</ol>
+
+<h2>这一章的骨架</h2>
+<p>这一章分三大块：事件怎么传（§1），数据库和流是什么关系（§2），拿到流以后怎么算（§3）。三块之间的线索是「日志」：§1 的日志式代理、§2 的变更数据捕获、§3 的容错，用的都是一条有序、可以从头再读的日志。容易乱的是 §2 和 §3.2：§2 在 CDC、事件溯源、不可变性之间来回比较；§3.2 的几个时间概念要分清是谁的时钟。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 350" role="img" aria-label="这一章的骨架：流处理分为传、存、算三块，各自下面列出几个问题和对应的节号，底部是贯穿全章的日志">
+  <rect class="box" x="190" y="8" width="260" height="36" rx="8"/>
+  <text class="t-b" x="320" y="31" text-anchor="middle">流：输入永远不会到齐</text>
+  <path class="ln" d="M320 44 V62 M110 62 H530 M110 62 V80 M320 62 V80 M530 62 V80"/>
+  <rect class="b-a" x="10" y="80" width="200" height="34" rx="6"/>
+  <text class="t-b" x="110" y="102" text-anchor="middle">传：事件怎么送到 §1</text>
+  <rect class="b-a" x="220" y="80" width="200" height="34" rx="6"/>
+  <text class="t-b" x="320" y="102" text-anchor="middle">存：数据库也是流 §2</text>
+  <rect class="b-a" x="430" y="80" width="200" height="34" rx="6"/>
+  <text class="t-b" x="530" y="102" text-anchor="middle">算：边来边处理 §3</text>
+  <rect class="box" x="10" y="128" width="200" height="34" rx="6"/>
+  <text x="110" y="150" text-anchor="middle">直连，还是经过代理 §1.1</text>
+  <rect class="box" x="10" y="170" width="200" height="34" rx="6"/>
+  <text x="110" y="192" text-anchor="middle">确认后删除的代理 §1.1</text>
+  <rect class="b-warn" x="10" y="212" width="200" height="34" rx="6"/>
+  <text x="110" y="234" text-anchor="middle">日志 + 偏移量 §1.2</text>
+  <text class="t-m" x="110" y="276" text-anchor="middle">慢消费者、重投、乱序</text>
+  <rect class="b-bad" x="220" y="128" width="200" height="34" rx="6"/>
+  <text x="320" y="150" text-anchor="middle">双写为什么会错 §2.1</text>
+  <rect class="box" x="220" y="170" width="200" height="34" rx="6"/>
+  <text x="320" y="192" text-anchor="middle">变更数据捕获 §2.2</text>
+  <rect class="box" x="220" y="212" width="200" height="34" rx="6"/>
+  <text x="320" y="234" text-anchor="middle">事件溯源、不可变 §2.3</text>
+  <rect class="box" x="220" y="254" width="200" height="34" rx="6"/>
+  <text x="320" y="276" text-anchor="middle">真要删掉怎么办 §2.3</text>
+  <rect class="box" x="430" y="128" width="200" height="34" rx="6"/>
+  <text x="530" y="150" text-anchor="middle">拿流做什么 §3.1</text>
+  <rect class="b-warn" x="430" y="170" width="200" height="34" rx="6"/>
+  <text x="530" y="192" text-anchor="middle">事件时间与窗口 §3.2</text>
+  <rect class="box" x="430" y="212" width="200" height="34" rx="6"/>
+  <text x="530" y="234" text-anchor="middle">三种连接 §3.3</text>
+  <rect class="box" x="430" y="254" width="200" height="34" rx="6"/>
+  <text x="530" y="276" text-anchor="middle">容错与恰好一次 §3.4</text>
+  <path class="ln-d" d="M110 284 V304 M320 288 V304 M530 288 V304"/>
+  <rect class="b-ok" x="10" y="304" width="620" height="34" rx="6"/>
+  <text x="320" y="326" text-anchor="middle">贯穿全章：一条有序、能从头再读的日志，把传、存、算接成一条线</text>
+</svg>
+<figcaption>本站画的全章结构。橙色两格是读的时候最容易卡住的地方，红色一格是 §2 要解决的那个问题。</figcaption>
+</figure>
+<p class="lede">边读边填：每行一个问题，读到答案就写一两句。只存在你这台设备的浏览器里，别人看不到。</p>
+<div class="table-wrap"><table class="findit">
+  <tr><th>要找的</th><th>带着这个问题读，找到了就写下来</th></tr>
+  <tr><td>选哪种代理</td><td><p class="q">什么样的负载适合确认后删除的代理，什么样的适合日志式代理？<span class="sec">§1.2</span></p><input class="note" data-key="12-f1" aria-label="选哪种代理：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>双写错在哪</td><td><p class="q">双写有哪两个问题？哪个是并发问题，哪个是容错问题？<span class="sec">§2.1</span></p><input class="note" data-key="12-f2" aria-label="双写错在哪：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>CDC 从哪起步</td><td><p class="q">日志不全时，新建一个派生系统要从哪开始？日志压缩怎么省掉这一步？<span class="sec">§2.2</span></p><input class="note" data-key="12-f3" aria-label="CDC 从哪起步：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>删得掉吗</td><td><p class="q">不可变的日志里，真要删掉某些数据，有哪些办法？各自的局限是什么？<span class="sec">§2.3</span></p><input class="note" data-key="12-f4" aria-label="删得掉吗：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>窗口何时关</td><td><p class="q">窗口已经宣布结束后，又来了属于它的事件，有哪两种处理办法？<span class="sec">§3.2</span></p><input class="note" data-key="12-f5" aria-label="窗口何时关：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>连接用哪个时刻</td><td><p class="q">流的连接为什么可能每次跑结果不一样？数据仓库里怎么让它确定下来？<span class="sec">§3.3</span></p><input class="note" data-key="12-f6" aria-label="连接用哪个时刻：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>恰好一次</td><td><p class="q">微批和检查点管不住的是哪一类输出？另外两条路是什么？<span class="sec">§3.4</span></p><input class="note" data-key="12-f7" aria-label="恰好一次：你的答案" placeholder="你的答案"></td></tr>
+</table></div>
+<details class="reveal"><summary>读完了？对照我找到的</summary><ul>
+  <li>选哪种代理：每条处理很贵、要逐条并行、不在乎顺序，选确认后删除；吞吐高、每条处理快、顺序要紧，选日志式。</li>
+  <li>双写错在哪：并发写交错，两边收到的顺序相反（并发）；一边写成功一边失败（容错，本质是原子提交）。</li>
+  <li>CDC 从哪起步：先拿一份对应日志某个偏移量的一致快照，再从那个偏移量接着应用；压缩过的主题从偏移量 0 读一遍就是全量。</li>
+  <li>删得掉吗：改写历史（Datomic 的 excision、Fossil 的 shunning），或加密粉碎；副本到处都是，只能做到「更难取回」。</li>
+  <li>窗口何时关：忽略迟到的事件（但要计数、报警），或者发一个更正，必要时撤回之前的结果。</li>
+  <li>连接用哪个时刻：不同流之间没有顺序保证；给被连接记录的每个版本一个唯一 ID，代价是不能做日志压缩。</li>
+  <li>恰好一次：离开框架的副作用（写外部数据库、发邮件）；另两条路是框架内部的原子提交，和幂等写入。</li>
+</ul></details>
+
+<h2>分节地图</h2>
+<p class="lede">全章约 1.8 万词（不算代码和图注），建议分四次读。第一次讲消息怎么传，节奏平稳；第二次是全章的思想重心，数据库和流其实是一回事；第三次换到流处理，§3.2 讲时间的那一节最需要慢读；第四次的连接和容错，要用到前面所有的概念。</p>
+<ol class="secmap">
+  <li class="sit">第一次坐下<span>§0–§1.2 · 约 5200 词 · 从批处理到消息代理</span></li>
+  <li data-sec="0"><b>In Chapter 11 we discussed…<span class="w">约 400 词</span></b><span class="cn">开篇</span><span class="what">批处理的输入有界，现实的数据无界。流是什么，这一章分哪三步走。</span></li>
+  <li data-sec="1"><b>Transmitting Event Streams<span class="w">约 500 词</span></b><span class="cn">传送事件流</span><span class="what">事件、生产者、消费者、主题这几个词；为什么轮询数据库不够用。</span></li>
+  <li data-sec="1.1"><b>Messaging Systems<span class="w">约 2100 词</span></b><span class="cn">消息系统</span><span class="what">两个问题区分各种系统：发得比收得快怎么办，节点崩溃丢不丢。再看直连、代理、确认和重投。</span></li>
+  <li data-sec="1.2"><b>Log-Based Message Brokers<span class="w">约 2100 词</span></b><span class="cn">基于日志的消息代理</span><span class="what">把消息存进分区的日志，按偏移量读。抓住它和传统代理在并行、顺序、重放上的差别。</span></li>
+  <li class="sit">第二次坐下<span>§2–§2.3 · 约 5100 词 · 数据库和流是一回事</span></li>
+  <li data-sec="2"><b>Databases and Streams<span class="w">约 400 词</span></b><span class="cn">数据库与流</span><span class="what">反过来，把流的想法用到数据库上：复制日志本来就是一条写事件的流。</span></li>
+  <li data-sec="2.1"><b>Keeping Systems in Sync<span class="w">约 600 词</span></b><span class="cn">让多个系统保持同步</span><span class="what">同一份数据存在好几个系统里，靠双写同步会出什么事。</span></li>
+  <li data-sec="2.2"><b>Change Data Capture<span class="w">约 2200 词</span></b><span class="cn">变更数据捕获</span><span class="what">把数据库的变更日志变成公开的流：初始快照、日志压缩、和事件溯源的对比，加一个讲模式的方框。</span></li>
+  <li data-sec="2.3"><b>State, Streams, and Immutability<span class="w">约 2000 词</span></b><span class="cn">状态、流与不可变性</span><span class="what">可变的状态和不可变的事件日志是什么关系；不可变的好处，和删不掉的麻烦。</span></li>
+  <li class="sit">第三次坐下<span>§3–§3.2 · 约 3900 词 · 流处理的用途和时间</span></li>
+  <li data-sec="3"><b>Processing Streams<span class="w">约 500 词</span></b><span class="cn">处理流</span><span class="what">拿到流能做的三件事，以及流处理和批处理唯一关键的不同。</span></li>
+  <li data-sec="3.1"><b>Uses of Stream Processing<span class="w">约 1700 词</span></b><span class="cn">流处理的用途</span><span class="what">复杂事件处理、流分析、维护物化视图、流上搜索，以及为什么 actor 不算流处理。</span></li>
+  <li data-sec="3.2"><b>Reasoning About Time<span class="w">约 1700 词</span></b><span class="cn">关于时间的推理</span><span class="what">事件时间和处理时间、迟到的事件、该信谁的时钟、四种窗口。全章最该慢读的一节。</span></li>
+  <li class="sit">第四次坐下<span>§3.3–§4 · 约 3700 词 · 连接、容错和小结</span></li>
+  <li data-sec="3.3"><b>Stream Joins<span class="w">约 1700 词</span></b><span class="cn">流的连接</span><span class="what">流和流、流和表、表和表三种连接，最后落到「跟哪个时刻的状态连接」。</span></li>
+  <li data-sec="3.4"><b>Fault Tolerance<span class="w">约 1300 词</span></b><span class="cn">容错</span><span class="what">永远跑不完的作业怎么做到恰好一次：微批、检查点、原子提交、幂等、重建状态。</span></li>
+  <li data-sec="4"><b>Summary<span class="w">约 800 词</span></b><span class="cn">小结</span><span class="what">全章回顾。先自己回忆一遍再读它。</span></li>
+</ol>
+
+<h2>先用中文过一遍</h2>
+<h3>两种消息代理：读完就删，还是读完只挪一下指针</h3>
+<p>生产者把事件交给代理，代理再交给消费者，这样双方不用同时在线。传统的消息代理（RabbitMQ 这类，遵循 AMQP 或 JMS 标准）像一个任务队列：每条消息单独派给某个消费者，消费者处理完回一个确认，代理就把它删掉；超时没收到确认，就把这条消息重投给别人。这对「每条都很贵、谁处理都行」的任务很合适，代价是消息一旦确认就没了，新来的消费者看不到过去的消息。</p>
+<p>日志式代理（Kafka 这类）换了个思路：消息按顺序追加到日志里，日志按分区切开放在多台机器上，每条消息在分区里有一个递增的编号，叫偏移量。消费者读消息不删消息，只记住自己读到了哪个偏移量。好比一群人读同一本账簿，各自夹各自的书签：多个消费者组互不影响，想重新处理昨天的数据，把书签往回挪就行。代价是并行度按分区算：一个分区在一个组里只交给一个消费者，按顺序一条条处理。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 280" role="img" aria-label="两种消息代理的对比：左边的队列把每条订单消息单独派给消费者 A 或 B，确认后删除；右边的日志分为两个分区，每条消息有偏移量，库存服务和数仓导入两个消费者组各自记着自己读到的位置">
+  <defs><marker id="a12a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="18">确认后删除（AMQP / JMS 式）</text>
+  <text class="t-b" x="335" y="18">日志式（Kafka 式）</text>
+  <path class="ln-d" d="M322 6 V272"/>
+  <rect class="box" x="20" y="40" width="64" height="28" rx="4"/><text class="t-mono" x="52" y="59" text-anchor="middle">#43</text>
+  <rect class="box" x="90" y="40" width="64" height="28" rx="4"/><text class="t-mono" x="122" y="59" text-anchor="middle">#44</text>
+  <rect class="box" x="160" y="40" width="64" height="28" rx="4"/><text class="t-mono" x="192" y="59" text-anchor="middle">#45</text>
+  <rect class="box" x="230" y="40" width="64" height="28" rx="4"/><text class="t-mono" x="262" y="59" text-anchor="middle">#46</text>
+  <path class="ln" d="M52 68 L80 116" marker-end="url(#a12a)"/><path class="ln" d="M122 68 L220 116" marker-end="url(#a12a)"/>
+  <rect class="b-a" x="20" y="118" width="120" height="32" rx="6"/><text x="80" y="139" text-anchor="middle">消费者 A</text>
+  <rect class="b-a" x="170" y="118" width="120" height="32" rx="6"/><text x="230" y="139" text-anchor="middle">消费者 B</text>
+  <text class="t-m" x="10" y="182">每条订单消息单独派给一个消费者</text>
+  <text class="t-m" x="10" y="204">处理完回一个确认，代理就删掉它</text>
+  <text class="t-m" x="10" y="226">超时没确认，就重投给别的消费者</text>
+  <text class="t-m" x="10" y="248">新来的消费者看不到已经删掉的消息</text>
+  <text class="t-m" x="335" y="59">分区 0</text>
+  <rect class="box" x="390" y="40" width="28" height="28" rx="3"/><text class="t-mono" x="404" y="59" text-anchor="middle">0</text>
+  <rect class="box" x="420" y="40" width="28" height="28" rx="3"/><text class="t-mono" x="434" y="59" text-anchor="middle">1</text>
+  <rect class="box" x="450" y="40" width="28" height="28" rx="3"/><text class="t-mono" x="464" y="59" text-anchor="middle">2</text>
+  <rect class="box" x="480" y="40" width="28" height="28" rx="3"/><text class="t-mono" x="494" y="59" text-anchor="middle">3</text>
+  <rect class="box" x="510" y="40" width="28" height="28" rx="3"/><text class="t-mono" x="524" y="59" text-anchor="middle">4</text>
+  <rect class="box" x="540" y="40" width="28" height="28" rx="3"/><text class="t-mono" x="554" y="59" text-anchor="middle">5</text>
+  <rect class="box" x="570" y="40" width="28" height="28" rx="3"/><text class="t-mono" x="584" y="59" text-anchor="middle">6</text>
+  <rect class="box" x="600" y="40" width="28" height="28" rx="3"/><text class="t-mono" x="614" y="59" text-anchor="middle">7</text>
+  <text class="t-a" x="464" y="86" text-anchor="middle">▲乙</text>
+  <text class="t-a" x="584" y="86" text-anchor="middle">▲甲</text>
+  <text class="t-m" x="335" y="119">分区 1</text>
+  <rect class="box" x="390" y="100" width="28" height="28" rx="3"/><text class="t-mono" x="404" y="119" text-anchor="middle">0</text>
+  <rect class="box" x="420" y="100" width="28" height="28" rx="3"/><text class="t-mono" x="434" y="119" text-anchor="middle">1</text>
+  <rect class="box" x="450" y="100" width="28" height="28" rx="3"/><text class="t-mono" x="464" y="119" text-anchor="middle">2</text>
+  <rect class="box" x="480" y="100" width="28" height="28" rx="3"/><text class="t-mono" x="494" y="119" text-anchor="middle">3</text>
+  <rect class="box" x="510" y="100" width="28" height="28" rx="3"/><text class="t-mono" x="524" y="119" text-anchor="middle">4</text>
+  <rect class="box" x="540" y="100" width="28" height="28" rx="3"/><text class="t-mono" x="554" y="119" text-anchor="middle">5</text>
+  <text class="t-m" x="574" y="119">← 追加</text>
+  <text class="t-a" x="434" y="146" text-anchor="middle">▲乙</text>
+  <text class="t-a" x="524" y="146" text-anchor="middle">▲甲</text>
+  <text class="t-m" x="335" y="182">甲＝库存服务，乙＝数仓导入，各记各的偏移量</text>
+  <text class="t-m" x="335" y="204">读消息不删消息，日志只往后追加</text>
+  <text class="t-m" x="335" y="226">一个分区在组里只交给一个消费者</text>
+  <text class="t-m" x="335" y="248">旧消息按段过期删除，和读没读过无关</text>
+</svg>
+<figcaption>本站画的示意图，数据是编的。左边的消费者 A、B 在抢同一个队列里的活；右边的甲、乙是两个独立的消费者组，三角指向它们下一条要读的消息。</figcaption>
+</figure>
+
+<h3>让数据库变成一条流：变更数据捕获和事件溯源</h3>
+<p>一个应用的数据常常要同时放在数据库、缓存、搜索索引和数据仓库里。最直接的同步办法是双写：应用改完数据库，再自己去改索引、清缓存。问题是两个请求同时改同一条记录时，两个系统可能以相反的顺序收到它们，最后各自留下不同的值，而且没有任何报错；另外，一边写成功、一边失败，也会对不上。</p>
+<p>变更数据捕获（CDC）的办法是：应用只写数据库，数据库按自己定下的提交顺序把变更写进复制日志，再把这份日志当成一条公开的流，索引、缓存、数仓都只是这条流的消费者。这其实就是第 6 章的主从复制：数据库当主，别的系统当从。事件溯源（第 3 章讲过）走得更远：应用一开始就不写「当前状态」，只把「发生了什么」作为不可变的事件追加进日志，状态全部从日志算出来。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 320" role="img" aria-label="上半部分是双写：运营甲和运营乙同时修改商品 8812 的价格，数据库先收到 39 后收到 45，搜索索引先收到 45 后收到 39，两边最终不一致；下半部分是变更数据捕获：应用只写数据库，数据库的变更日志按顺序记下 39 和 45，搜索索引和缓存按同样顺序应用，结果都是 45">
+  <defs><marker id="a12b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="18">双写：应用自己去写两处</text>
+  <text class="t-m" x="10" y="42">数据库收到的顺序</text>
+  <text class="t-m" x="330" y="42">搜索索引收到的顺序</text>
+  <rect class="box" x="10" y="50" width="300" height="30" rx="5"/>
+  <text x="20" y="70">① 运营甲：#8812 改成 39 元</text>
+  <rect class="box" x="10" y="86" width="300" height="30" rx="5"/>
+  <text x="20" y="106">② 运营乙：#8812 改成 45 元</text>
+  <rect class="box" x="330" y="50" width="300" height="30" rx="5"/>
+  <text x="340" y="70">① 运营乙：#8812 改成 45 元</text>
+  <rect class="box" x="330" y="86" width="300" height="30" rx="5"/>
+  <text x="340" y="106">② 运营甲：#8812 改成 39 元（晚到）</text>
+  <text class="t-ok" x="20" y="138">最后是 45 元</text>
+  <text class="t-bad" x="340" y="138">最后是 39 元，从此对不上</text>
+  <text class="t-m" x="10" y="162">两边都没报错。另一种坏法：一边写成功，一边写失败。</text>
+  <path class="ln-d" d="M10 176 H630"/>
+  <text class="t-b" x="10" y="200">变更数据捕获：只写数据库，别的系统跟着它的日志走</text>
+  <rect class="b-a" x="10" y="232" width="80" height="34" rx="6"/><text x="50" y="254" text-anchor="middle">应用</text>
+  <rect class="b-a" x="114" y="232" width="96" height="34" rx="6"/><text x="162" y="254" text-anchor="middle">数据库</text>
+  <rect class="b-warn" x="234" y="232" width="100" height="34" rx="4"/><text class="t-mono" x="284" y="254" text-anchor="middle">8812=39</text>
+  <rect class="b-warn" x="338" y="232" width="100" height="34" rx="4"/><text class="t-mono" x="388" y="254" text-anchor="middle">8812=45</text>
+  <text class="t-m" x="336" y="224" text-anchor="middle">变更日志（按提交顺序）</text>
+  <rect class="b-ok" x="490" y="212" width="140" height="32" rx="6"/><text x="560" y="233" text-anchor="middle">搜索索引：45</text>
+  <rect class="b-ok" x="490" y="256" width="140" height="32" rx="6"/><text x="560" y="277" text-anchor="middle">缓存：45</text>
+  <path class="ln" d="M90 249 H112" marker-end="url(#a12b)"/><path class="ln" d="M210 249 H232" marker-end="url(#a12b)"/><path class="ln" d="M438 249 L488 228" marker-end="url(#a12b)"/><path class="ln" d="M438 249 L488 272" marker-end="url(#a12b)"/>
+  <text class="t-m" x="10" y="308">顺序由数据库一处说了算，下游按同样的顺序应用，结果就一样</text>
+</svg>
+<figcaption>本站画的示意图，商品号和价格是编的。书里用一个抽象的键和两个值说明同一件事。</figcaption>
+</figure>
+<p>这一节背后有一个更大的想法：可变的状态和不可变的事件日志，是同一样东西的两种样子。仓库的库存是所有入库、出库单算出来的，会员积分是每一次消费和兑换累加出来的。日志存下来，状态随时能重算；数据库存的「当前值」，不过是日志末尾的一份缓存。代价也在这里：日志会一直长，真要删掉某个人的数据，在不可变的世界里很难。</p>
+<figure class="fig"><img src="../assets/img/12-ledger.jpg" alt="一本摊开的旧账本，两页上用墨水手写着日期、人名和金额，几行被横线划掉，划掉的字仍然看得清" loading="lazy">
+<figcaption>Denis Nealon 的账本兼日记里的两页，记的是 1870 年 2 月到 3 月几处营地（shanty）的账，与本书无关。账本是很老的一种「只追加的日志」：一笔一笔往下记，余额是加出来的。有几行被划掉了，但原来写的字还看得清。§2.3 说会计更讲究：记错了不涂改，而是再记一笔冲正。<span class="src">Deseronto Archives，无已知版权限制，维基共享资源</span></figcaption></figure>
+
+<h3>事件时间、处理时间和窗口</h3>
+<p>流分析常常要「按分钟统计」。可「这一分钟」有两种算法：按事件发生的时间（事件时间），还是按流处理器看到它的时间（处理时间）？平时两者只差几毫秒，可一旦有积压、断网、重启，处理时间就会把一批旧事件当成「刚刚发生」。按事件时间算才对，但新的麻烦来了：你永远说不准一个窗口的事件到齐了没有，总可能有一条还在路上，这就是迟到的事件（straggler）。只能等一会儿再宣布窗口结束；等得越久越完整，结果也出得越晚。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 300" role="img" aria-label="两条时间轴：上面是事件发生的时间，下面是事件到达的时间，每个事件用一条线连起来。大多数线几乎竖直；一条晚了 45 秒的线和别的线交叉；一条断网补发的线斜得很厉害。下方三行说明水位线怎样让 12:00 的窗口输出，以及之后到达的事件怎么办">
+  <text class="t-b" x="10" y="20">事件时间（发生）</text>
+  <rect class="f-soft" x="100" y="44" width="125" height="12" rx="3"/>
+  <path class="ln" d="M100 50 H630 M100 44 V56 M225 44 V56 M350 44 V56 M475 44 V56 M600 44 V56"/>
+  <text class="t-m" x="100" y="38" text-anchor="middle">12:00</text>
+  <text class="t-m" x="162" y="38" text-anchor="middle">窗口</text>
+  <text class="t-m" x="225" y="38" text-anchor="middle">12:01</text>
+  <text class="t-m" x="350" y="38" text-anchor="middle">12:02</text>
+  <text class="t-m" x="475" y="38" text-anchor="middle">12:03</text>
+  <text class="t-m" x="600" y="38" text-anchor="middle">12:04</text>
+  <path class="ln" d="M100 190 H630 M100 184 V196 M225 184 V196 M350 184 V196 M475 184 V196 M600 184 V196"/>
+  <text class="t-m" x="100" y="210" text-anchor="middle">12:00</text>
+  <text class="t-m" x="225" y="210" text-anchor="middle">12:01</text>
+  <text class="t-m" x="287" y="210" text-anchor="middle">①</text>
+  <text class="t-m" x="350" y="210" text-anchor="middle">12:02</text>
+  <text class="t-m" x="475" y="210" text-anchor="middle">12:03</text>
+  <text class="t-m" x="600" y="210" text-anchor="middle">12:04</text>
+  <text class="t-b" x="10" y="230">处理时间（到达）</text>
+  <path class="ln" d="M119 50 L131 190 M156 50 L169 190 M237 50 L250 190 M275 50 L287 190 M350 50 L362 190"/>
+  <path class="ln-a" d="M200 50 L294 190"/>
+  <path class="ln-bad" d="M175 50 L512 190"/>
+  <circle class="f-a" cx="119" cy="50" r="4"/><circle class="f-a" cx="156" cy="50" r="4"/><circle class="f-a" cx="200" cy="50" r="4"/><circle class="f-a" cx="175" cy="50" r="4"/><circle class="f-a" cx="237" cy="50" r="4"/><circle class="f-a" cx="275" cy="50" r="4"/><circle class="f-a" cx="350" cy="50" r="4"/>
+  <circle class="f-a" cx="131" cy="190" r="4"/><circle class="f-a" cx="169" cy="190" r="4"/><circle class="f-a" cx="294" cy="190" r="4"/><circle class="f-a" cx="512" cy="190" r="4"/><circle class="f-a" cx="250" cy="190" r="4"/><circle class="f-a" cx="287" cy="190" r="4"/><circle class="f-a" cx="362" cy="190" r="4"/>
+  <text class="t-m" x="10" y="254">① 12:01:30 见过的最大事件时间是 12:01:24，等 20 秒，水位线到 12:01:04</text>
+  <text class="t-m" x="10" y="274">② 水位线越过 12:01，12:00 这个窗口（上方浅色段）就输出结果</text>
+  <text class="t-m" x="10" y="294">③ 之后才到的 12:00:48（蓝线）和断网补发的 12:00:36（红线）：丢掉或发更正</text>
+</svg>
+<figcaption>本站画的示意图。每条线连着同一个事件的发生时刻和到达时刻；线越斜，路上走得越久，两条线交叉就是乱序。「水位线」是下面模拟器用的规则。这一节没有用这个词；书里只在 §2.2 讲 Debezium 的快照时提到 watermarking，意思不同。</figcaption>
+</figure>
+<p>窗口怎么划也有几种。滚动窗口首尾相接、不重叠，每个事件只属于一个窗口；跳跃窗口长度固定但互相重叠，统计更平滑；滑动窗口按事件彼此之间的距离来定，不看固定的边界；会话窗口没有固定长度，同一个用户隔了一段时间没动静，会话就结束。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 300" role="img" aria-label="同一组七个事件放在 12:00 到 12:06 的时间轴上，分别用滚动窗口、跳跃窗口、滑动窗口和会话窗口来划分">
+  <path class="ln" d="M90 40 H630 M90 36 V44 M180 36 V44 M270 36 V44 M360 36 V44 M450 36 V44 M540 36 V44 M630 36 V44"/>
+  <text class="t-m" x="90" y="28" text-anchor="middle">12:00</text>
+  <text class="t-m" x="270" y="28" text-anchor="middle">12:02</text>
+  <text class="t-m" x="450" y="28" text-anchor="middle">12:04</text>
+  <text class="t-m" x="630" y="28" text-anchor="end">12:06</text>
+  <text class="t-m" x="8" y="57">事件</text>
+  <circle class="f-a" cx="117" cy="52" r="5"/><circle class="f-a" cx="162" cy="52" r="5"/><circle class="f-a" cx="243" cy="52" r="5"/><circle class="f-a" cx="288" cy="52" r="5"/><circle class="f-a" cx="495" cy="52" r="5"/><circle class="f-a" cx="522" cy="52" r="5"/><circle class="f-a" cx="576" cy="52" r="5"/>
+  <text class="t-b" x="8" y="87">滚动</text>
+  <rect class="box" x="90" y="70" width="180" height="24" rx="4"/><text x="180" y="87" text-anchor="middle">3 个</text>
+  <rect class="box" x="270" y="70" width="180" height="24" rx="4"/><text x="360" y="87" text-anchor="middle">1 个</text>
+  <rect class="box" x="450" y="70" width="180" height="24" rx="4"/><text x="540" y="87" text-anchor="middle">3 个</text>
+  <text class="t-b" x="8" y="135">跳跃</text>
+  <rect class="b-a" x="90" y="106" width="180" height="10" rx="3"/>
+  <rect class="b-a" x="180" y="119" width="180" height="10" rx="3"/>
+  <rect class="b-a" x="270" y="132" width="180" height="10" rx="3"/>
+  <rect class="b-a" x="360" y="145" width="180" height="10" rx="3"/>
+  <text class="t-m" x="90" y="174">每个窗口长 2 分钟，每分钟开一个，互相重叠</text>
+  <text class="t-b" x="8" y="203">滑动</text>
+  <rect class="b-a" x="342" y="188" width="180" height="22" rx="4"/>
+  <text class="t-m" x="530" y="203">往回 2 分钟</text>
+  <text class="t-m" x="90" y="228">相隔不到 2 分钟的事件落在同一个窗口里</text>
+  <text class="t-b" x="8" y="267">会话</text>
+  <rect class="b-ok" x="117" y="250" width="171" height="24" rx="4"/><text x="202" y="267" text-anchor="middle">会话 1</text>
+  <text class="t-m" x="391" y="267" text-anchor="middle">空闲超过 1 分钟就结束</text>
+  <rect class="b-ok" x="495" y="250" width="81" height="24" rx="4"/><text x="535" y="267" text-anchor="middle">会话 2</text>
+</svg>
+<figcaption>本站画的示意图，七个事件是随便放的。同一组事件，按四种窗口切出来的结果完全不同；选哪种取决于你要回答什么问题。</figcaption>
+</figure>
+
+<h3>恰好一次：输出要么全算数，要么全作废</h3>
+<p>批处理的容错很简单：任务失败了，扔掉它写了一半的输出，换台机器从头再跑，最终结果和没失败一样，好像每条记录恰好处理了一次。流处理做不到「等任务做完再公开输出」，因为它永远做不完。办法是把流切成小段：要么每段当一个小批处理（微批），要么定期给状态拍一张检查点，崩溃后从最近的检查点重来，把之后的输出作废。</p>
+<p>这只管得住框架内部。输出一旦离开框架，写进外部数据库、发了邮件，就收不回来了，重来一次就会做两遍。剩下两条路：一是让「处理这条消息」的所有后果（输出、状态变化、移动偏移量）在一个事务里一起提交；二是把写操作做成幂等的，做两遍和做一遍效果一样，比如写入时带上触发它的那条消息的偏移量，重复的就能认出来。</p>
+
+<h3>这一章点名的系统</h3>
+<div class="sys">
+  <div><b>Apache Kafka</b><span class="k">日志式消息代理</span> 按分区存日志，消费者用偏移量记进度，支持日志压缩。书里反复拿它举例。</div>
+  <div><b>RabbitMQ</b><span class="k">消息代理</span> 书里列出的 AMQP / JMS 一类传统代理之一，确认后删除消息。</div>
+  <div><b>Debezium</b><span class="k">CDC 工具</span> 开源项目，接到 MySQL、PostgreSQL 等数据库的复制日志上，用统一的事件格式吐出变更。</div>
+  <div><b>Apache Flink</b><span class="k">流处理框架</span> 定期给算子状态做检查点，写到持久存储上，崩溃后从最近的检查点重来。</div>
+  <div><b>Spark Streaming</b><span class="k">流处理框架</span> 用微批：把流切成一秒左右的小批，每批当一次小的批处理。</div>
+  <div><b>Kafka Streams</b><span class="k">流处理库</span> 把状态的变更发到一个开启了日志压缩的主题里，用来复制和恢复状态。</div>
+  <div><b>Materialize</b><span class="k">数据库</span> 书里列出的增量视图维护（IVM）数据库之一，同列的还有 RisingWave、ClickHouse、Feldera。</div>
+  <div><b>Esper</b><span class="k">复杂事件处理</span> 书里列出的 CEP 实现之一，按事先定好的规则在事件流里找模式。</div>
+  <div><b>Elasticsearch</b><span class="k">搜索引擎</span> 它的 percolator 功能先存查询、再拿新文档去匹配，书里举它做流上搜索。</div>
+  <div><b>Druid</b><span class="k">分析数据库</span> 书里的例子：直接从 Kafka 摄入事件，在同一份日志上建自己的视图。</div>
+</div>
+
+<div class="table-wrap"><table class="terms">
+  <tr><th>英文</th><th>中文</th><th>一句话</th></tr>
+  <tr><td>message broker</td><td><a class="term" href="../glossary.html#g-message-broker">消息代理</a></td><td>专门为消息流优化的服务器，生产者写进去，它再投给消费者（§1.1）。</td></tr>
+  <tr><td>backpressure</td><td>背压</td><td>接收方处理不过来时，让发送方停下来等（§1.1）。</td></tr>
+  <tr><td>acknowledgment</td><td>确认</td><td>消费者告诉代理「这条处理完了」，代理才把它移出队列（§1.1）。</td></tr>
+  <tr><td>dead letter queue (DLQ)</td><td>死信队列</td><td>反复处理失败的消息被挪进去，别卡住后面的消息（§1.1）。</td></tr>
+  <tr><td>consumer group</td><td>消费者组</td><td>组内分摊消息，不同组各收一份（§1.1、§1.2）。</td></tr>
+  <tr><td>log-based message broker</td><td>日志式消息代理</td><td>把消息追加进分区的日志，读不删除，按偏移量读（§1.2）。</td></tr>
+  <tr><td>offset</td><td>偏移量</td><td>消息在分区里的递增编号，消费者用它记进度（§1.2）。</td></tr>
+  <tr><td>change data capture (CDC)</td><td><a class="term" href="../glossary.html#g-cdc">变更数据捕获</a></td><td>把写进数据库的每一个变更取出来，作为流交给别的系统（§2.2）。</td></tr>
+  <tr><td>log compaction</td><td><a class="term" href="../glossary.html#g-compaction">日志压缩</a></td><td>同一个键只留最新的一条，日志大小只取决于当前数据（§2.2）。</td></tr>
+  <tr><td>outbox pattern</td><td>发件箱模式</td><td>专门开几张对外的表给 CDC 读，内部的表随便改（§2.2 方框）。</td></tr>
+  <tr><td>event sourcing</td><td><a class="term" href="../glossary.html#g-event-sourcing">事件溯源</a></td><td>只记不可变的事件，状态全部从事件日志推出来（§2.2、§2.3）。</td></tr>
+  <tr><td>event time / processing time</td><td>事件时间 / 处理时间</td><td>事件发生的时刻，和流处理器处理它的时刻（§3.2）。</td></tr>
+  <tr><td>straggler</td><td>迟到的事件</td><td>窗口已经宣布结束以后才到的事件（§3.2）。</td></tr>
+  <tr><td>exactly-once semantics</td><td><a class="term" href="../glossary.html#g-exactly-once">恰好一次语义</a></td><td>可能重试多次，但看到的效果和每条只处理一次一样（§3.4）。</td></tr>
+  <tr><td>idempotence</td><td><a class="term" href="../glossary.html#g-idempotence">幂等</a></td><td>做多次和做一次效果相同（§3.4）。</td></tr>
+</table></div>
+
+<h2>动手：模拟器</h2>
+<p>书里提到一种特殊消息，告诉下游「从现在起不会再有早于某个时刻的事件」，可以用它来触发窗口。很多流处理框架（比如 Flink）把这个时刻叫作水位线（watermark）。下面的模拟器用一种常见的算法：水位线 ＝ 目前见过的最大事件时间 − 等待时间；水位线越过窗口的结束时刻，窗口就输出；之后才到的、属于这个窗口的事件就是迟到的。</p>
+<p>先猜：等待时间为 0 时，32 个事件里会丢掉几个？等 30 秒呢？要把断网网关补发的事件全部收进来，得等多久？代价是什么？猜好了再动手。</p>
+<div class="sim" id="sim-12">
+  <div class="sim-head"><span class="tag">模拟器</span><h3>事件时间、窗口与迟到的事件</h3><p class="desc">一个门店系统按事件时间统计每分钟的订单数。事件按到达的先后一个个进来，格子里写的是事件发生的时间（1:08 就是 12:01:08）。从「下一个事件」开始，看水位线怎么推进、窗口什么时候输出、谁被丢掉。绿格子算进了已输出的窗口，红格子被丢掉，蓝格子是窗口输出后才到、发了更正的。</p></div>
+  <div class="sim-body">
+    <div class="controls">
+      <button data-a="step">下一个事件</button>
+      <button data-a="five">再来 5 个</button>
+      <button data-a="all">全部放完</button>
+      <button data-a="reset">重置</button>
+      <span class="sep"></span>
+      <label>等待时间 <select data-r="wait"><option value="0">0 秒</option><option value="10" selected>10 秒</option><option value="20">20 秒</option><option value="30">30 秒</option><option value="60">60 秒</option><option value="180">180 秒</option></select></label>
+      <label>窗口 <select data-r="len"><option value="60" selected>1 分钟</option><option value="120">2 分钟</option></select></label>
+      <label>迟到的事件 <select data-r="late"><option value="drop" selected>丢掉</option><option value="fix">发更正</option></select></label>
+    </div>
+    <div class="stage" data-r="stage"></div>
+    <div class="narrate" data-r="say">点「下一个事件」，一个一个看。</div>
+    <div class="stats" data-r="stats"></div>
+  </div>
+</div>
+<ol class="qs">
+  <li>等待时间 0 秒、窗口 1 分钟、迟到的丢掉，点「全部放完」，数一数丢了几个；改成 30 秒再看。丢掉的少了，「窗口结束后平均多久才输出」变成了多少？</li>
+  <li>重置，等待时间 0 秒，一个个点到第 7 个事件（发生在 0:52，路上走了 25 秒），它为什么被丢掉？换成 10 秒，同一个事件为什么就收进去了？</li>
+  <li>断网网关补发的三个事件，路上走了一分多钟到两分半钟。等待时间要调到多少才一个不丢？这时一共输出了几个窗口？再把「迟到的事件」换成「发更正」，比较两种做法的输出。</li>
+</ol>
+
+<h2>词与短语</h2>
+<p class="lede">词条按在书里出现的顺序排，按节分组；读一节之前先把这一节的过一遍，读的时候就不用停。斜体小字是原句里连续的几个词，在电子书里搜它就能找到那一句。标着「每个字都认识」的，是字面意思会把你带偏的。行话（CDC、offset、straggler 这类）不在这里，在上面的术语表里。</p>
+
+<h3 class="sec-head" id="s0">§0 <span class="first">In Chapter 11 we discussed…</span></h3>
+<div class="entry trap"><div class="en">not an option</div><div class="loc" data-p="4">… starting the output early is not an option.</div><div class="zh">根本不能这么做</div><div class="note">option 是「可走的路」。is not an option 说的是行不通，不是「不是一个选项」。</div></div>
+<div class="entry trap"><div class="en">go out of business</div><div class="loc" data-p="5">… Unless you go out of business, this …</div><div class="zh">倒闭、关门</div><div class="note">作者的玩笑：除非公司倒闭，否则数据不会停。</div></div>
+<div class="entry"><div class="en">counterpart</div><div class="loc" data-p="8">… the unbounded, incrementally processed counterpart to …</div><div class="zh">对应物、另一面</div></div>
+
+<h3 class="sec-head" id="s1">§1 <span class="first">Transmitting Event Streams</span></h3>
+<div class="entry"><div class="en">self-contained</div><div class="loc" data-p="10">… a small, self-contained, immutable object …</div><div class="zh">自成一体的（不靠别处的信息就能读懂）</div></div>
+<div class="entry trap"><div class="en">afterthought</div><div class="loc" data-p="16">… have been somewhat of an afterthought …</div><div class="zh">事后才补上的东西</div><div class="note">设计时没当回事、后来才加上的功能。somewhat of a 是「有点算是」。</div></div>
+
+<h3 class="sec-head" id="s1.1">§1.1 <span class="first">Messaging Systems</span></h3>
+<div class="entry trap"><div class="en">afford to</div><div class="loc" data-p="24">… you can afford to sometimes lose …</div><div class="zh">承受得起（某种损失）</div><div class="note">afford 不只是「花得起钱」，can afford to lose 是「丢了也没关系」。</div></div>
+<div class="entry trap"><div class="en">break down</div><div class="loc" data-p="33">… this approach may break down if …</div><div class="zh">（方法）失灵、行不通</div><div class="note">说的是办法不管用了，不是机器坏了。§3.2 开头的 it breaks down with 也是这个意思。</div></div>
+<div class="entry trap"><div class="en">come and go</div><div class="loc" data-p="35">… tolerate clients that come and go …</div><div class="zh">来来去去（连上、断开、崩溃）</div></div>
+<div class="entry"><div class="en">a fraction of a second</div><div class="loc" data-p="36">… often within a fraction of a second, …</div><div class="zh">不到一秒</div></div>
+<div class="entry trap"><div class="en">spill to disk</div><div class="loc" data-p="39">… perhaps spilling messages to disk if …</div><div class="zh">（内存放不下）溢写到磁盘</div><div class="note">spill 本义是洒出来。数据库和计算引擎里常说内存不够时 spill 到盘上。</div></div>
+<div class="entry trap"><div class="en">tune in</div><div class="loc" data-p="47">… each “tune in” to the same …</div><div class="zh">收听、调到同一个频道</div><div class="note">收音机的说法：几个消费者各自收听同一路广播，互不影响。</div></div>
+<div class="entry trap"><div class="en">make progress</div><div class="loc" data-p="55">… no further progress can be made.</div><div class="zh">（处理）往前推进</div><div class="note">分布式系统里 progress 指能不能继续往下处理，no progress 就是卡死在原地。</div></div>
+
+<h3 class="sec-head" id="s1.2">§1.2 <span class="first">Log-Based Message Brokers</span></h3>
+<div class="entry"><div class="en">leave no trace</div><div class="loc" data-p="57">… operation that leaves no permanent trace.</div><div class="zh">不留下（永久的）痕迹</div></div>
+<div class="entry"><div class="en">mindset</div><div class="loc" data-p="57">… inherited this transient messaging mindset.</div><div class="zh">思维方式、思路</div></div>
+<div class="entry trap"><div class="en">destructive</div><div class="loc" data-p="59">… receiving a message is destructive if …</div><div class="zh">（读一次就）毁掉原数据的</div><div class="note">不是「搞破坏」，是说读完消息就被删了，没法再读第二次。</div></div>
+<div class="entry trap"><div class="en">trivially</div><div class="loc" data-p="68">… The log-based approach trivially supports fan-out …</div><div class="zh">不费吹灰之力地、天然就</div><div class="note">trivial 在技术英文里常是「不费事」，不是「琐碎」。</div></div>
+<div class="entry trap"><div class="en">hold up</div><div class="loc" data-p="71">… it holds up the processing of …</div><div class="zh">拖住、耽搁</div><div class="note">不是「举起」或「撑住」。hold-up 当名词是「延误」。</div></div>
+<div class="entry"><div class="en">blurred</div><div class="loc" data-p="72">… two architectures is being blurred since …</div><div class="zh">（界线）变得模糊</div></div>
+<div class="entry trap"><div class="en">bookkeeping</div><div class="loc" data-p="74">… The reduced bookkeeping overhead and …</div><div class="zh">（为了跟踪进度的）记录工作</div><div class="note">本义记账。这里指代理要为每条消息记确认状态的那些开销。</div></div>
+<div class="entry trap"><div class="en">back-of-the-envelope</div><div class="loc" data-p="79">… Let’s do a back-of-the-envelope calculation.</div><div class="zh">粗略估算</div><div class="note">在信封背面随手算一算，只求数量级对。</div></div>
+<div class="entry"><div class="en">at the time of writing</div><div class="loc" data-p="79">… At the time of writing, a …</div><div class="zh">写这本书的时候</div><div class="note">提醒读者：后面的数字会过时。</div></div>
+<div class="entry"><div class="en">fall behind</div><div class="loc" data-p="82">… If a consumer falls so far behind …</div><div class="zh">落后</div></div>
+<div class="entry trap"><div class="en">manipulate</div><div class="loc" data-p="86">… it can easily be manipulated if necessary …</div><div class="zh">调整、改动</div><div class="note">技术英文里没有「操纵」的贬义，就是按需要去改它。</div></div>
+
+<h3 class="sec-head" id="s2">§2 <span class="first">Databases and Streams</span></h3>
+<div class="entry trap"><div class="en">go as far as</div><div class="loc" data-p="90">… have to go as far as adopting …</div><div class="zh">走到……那一步</div><div class="note">don’t have to go as far as：不必做得那么彻底。</div></div>
+<div class="entry trap"><div class="en">run deeper than</div><div class="loc" data-p="90">… runs deeper than just the physical storage …</div><div class="zh">比……更深一层</div><div class="note">run 在这里是「延伸到」，联系不止于表面那一点。</div></div>
+
+<h3 class="sec-head" id="s2.1">§2.1 <span class="first">Keeping Systems in Sync</span></h3>
+<div class="entry trap"><div class="en">nontrivial</div><div class="loc" data-p="94">… most nontrivial applications need to combine …</div><div class="zh">有一定规模的、不是玩具的</div><div class="note">nontrivial 不是「重要的」，是「不是随手写写的」。</div></div>
+<div class="entry"><div class="en">unlucky timing</div><div class="loc" data-p="97">… Because of unlucky timing, the requests …</div><div class="zh">时机不巧</div></div>
+
+<h3 class="sec-head" id="s2.2">§2.2 <span class="first">Change Data Capture</span></h3>
+<div class="entry trap"><div class="en">surface</div><div class="loc" data-p="111">… and surface the changes in a standard …</div><div class="zh">（动词）把……拿出来、呈现出来</div><div class="note">本义是浮出水面：把藏在复制日志里的变更翻出来给别人用。</div></div>
+<div class="entry"><div class="en">retrofitted</div><div class="loc" data-p="123">… the retrofitted and reverse-engineered CDC efforts …</div><div class="zh">事后加装的</div></div>
+<div class="entry trap"><div class="en">sidestep</div><div class="loc" data-p="124">… Cassandra sidesteps this issue by exposing …</div><div class="zh">绕开（问题）</div><div class="note">不是解决了，是躲开了：把难题留给读日志的人。</div></div>
+<div class="entry"><div class="en">at will</div><div class="loc" data-p="127">… updating and deleting records at will.</div><div class="zh">随意、想改就改</div></div>
+<div class="entry"><div class="en">customer-facing</div><div class="loc" data-p="131">… can cause a customer-facing outage.</div><div class="zh">用户直接看得到的</div></div>
+<div class="entry trap"><div class="en">as they see fit</div><div class="loc" data-p="132">… schemas as they see fit while …</div><div class="zh">按自己认为合适的方式</div><div class="note">see 在这里是「认为」，fit 是「合适」。</div></div>
+
+<h3 class="sec-head" id="s2.3">§2.3 <span class="first">State, Streams, and Immutability</span></h3>
+<div class="entry trap"><div class="en">two sides of the same coin</div><div class="loc" data-p="141">… two sides of the same coin. …</div><div class="zh">一枚硬币的两面</div><div class="note">看上去对立，其实是同一样东西。</div></div>
+<div class="entry"><div class="en">mathematically inclined</div><div class="loc" data-p="142">… If you are mathematically inclined, you …</div><div class="zh">喜欢用数学的方式想问题</div></div>
+<div class="entry"><div class="en">compensate for</div><div class="loc" data-p="148">… another transaction that compensates for the mistake …</div><div class="zh">抵消、弥补</div></div>
+<div class="entry trap"><div class="en">decide against</div><div class="loc" data-p="150">… but then decided against it.</div><div class="zh">决定不要了</div><div class="note">against 不是「反对」某人，是最后没选它。</div></div>
+<div class="entry"><div class="en">fallacy</div><div class="loc" data-p="154">… is based on the fallacy that …</div><div class="zh">错误的假定</div></div>
+<div class="entry trap"><div class="en">by construction</div><div class="loc" data-p="159">… By construction, it processes only a …</div><div class="zh">从构造上就保证了</div><div class="note">数学里的说法：不用额外检查，结构本身就决定了它只能这样。</div></div>
+<div class="entry trap"><div class="en">churn</div><div class="loc" data-p="161">… the amount of churn in the dataset.</div><div class="zh">（数据）变动的频繁程度</div><div class="note">本义搅动。用户流失也叫 churn，这里说的是数据被反复改写、删除。</div></div>
+<div class="entry"><div class="en">prohibitively</div><div class="loc" data-p="161">… history may grow prohibitively large, …</div><div class="zh">大到承受不起</div></div>
+<div class="entry trap"><div class="en">move the problem around</div><div class="loc" data-p="166">… this only moves the problem around; …</div><div class="zh">只是把问题挪了个地方</div><div class="note">没有解决，只是换了个地方出现：数据不可变了，密钥库却得可变。</div></div>
+<div class="entry trap"><div class="en">up front</div><div class="loc" data-p="166">… you have to decide up front which …</div><div class="zh">事先、一开始就</div></div>
+<div class="entry"><div class="en">unwieldy</div><div class="loc" data-p="166">… would get too unwieldy, as …</div><div class="zh">臃肿难管</div></div>
+
+<h3 class="sec-head" id="s3">§3 <span class="first">Processing Streams</span></h3>
+<div class="entry"><div class="en">viable</div><div class="loc" data-p="175">… may not be a viable option.</div><div class="zh">可行的</div></div>
+
+<h3 class="sec-head" id="s3.1">§3.1 <span class="first">Uses of Stream Processing</span></h3>
+<div class="entry trap"><div class="en">geared toward</div><div class="loc" data-p="182">… especially geared toward the kind of …</div><div class="zh">专门面向</div><div class="note">gear 是齿轮，「调好齿轮去配合」某种用途。</div></div>
+<div class="entry trap"><div class="en">standing query</div><div class="loc" data-p="184">… any of its standing queries.</div><div class="zh">长期挂着的查询</div><div class="note">standing 是「常设的」，不是「站着的」；standing order 是长期委托。</div></div>
+<div class="entry"><div class="en">as a general rule</div><div class="loc" data-p="186">… but as a general rule, stream …</div><div class="zh">大体上说</div></div>
+<div class="entry trap"><div class="en">run counter to</div><div class="loc" data-p="195">… forever runs counter to the assumptions of …</div><div class="zh">和……相抵触</div></div>
+<div class="entry"><div class="en">bespoke</div><div class="loc" data-p="202">… Bespoke solutions work in a few cases, …</div><div class="zh">量身定制的</div></div>
+<div class="entry trap"><div class="en">turn something on its head</div><div class="loc" data-p="206">… turns the processing on its head.</div><div class="zh">把……整个颠倒过来</div></div>
+<div class="entry trap"><div class="en">that said</div><div class="loc" data-p="212">… That said, there is some crossover …</div><div class="zh">话虽如此</div><div class="note">前面刚下了结论，接着要补一句例外。</div></div>
+<div class="entry trap"><div class="en">farm out</div><div class="loc" data-p="212">… to be farmed out to a set …</div><div class="zh">分派出去</div><div class="note">和农场无关，是把活儿分给别人做。</div></div>
+
+<h3 class="sec-head" id="s3.2">§3.2 <span class="first">Reasoning About Time</span></h3>
+<div class="entry"><div class="en">crunch through</div><div class="loc" data-p="215">… rapidly crunch through a large collection …</div><div class="zh">一口气算完（大量数据）</div></div>
+<div class="entry"><div class="en">negligibly</div><div class="loc" data-p="217">… event processing is negligibly short.</div><div class="zh">（短）到可以忽略</div></div>
+<div class="entry"><div class="en">cope with</div><div class="loc" data-p="220">… able to cope with such discontinuities, …</div><div class="zh">应付</div></div>
+<div class="entry trap"><div class="en">time has moved on</div><div class="loc" data-p="224">… and time has moved on; now …</div><div class="zh">时间已经往前走了</div><div class="note">move on 是「往下走、翻篇」：新到的事件都已经是后面几分钟的了。</div></div>
+<div class="entry"><div class="en">retract</div><div class="loc" data-p="227">… need to retract the previous output.</div><div class="zh">撤回</div></div>
+<div class="entry"><div class="en">round down</div><div class="loc" data-p="239">… rounding it down to the nearest minute …</div><div class="zh">向下取整</div></div>
+
+<h3 class="sec-head" id="s3.3">§3.3 <span class="first">Stream Joins</span></h3>
+<div class="entry"><div class="en">augmented with</div><div class="loc" data-p="253">… has been augmented with profile information …</div><div class="zh">补充了、加上了</div></div>
+<div class="entry trap"><div class="en">the beginning of time</div><div class="loc" data-p="257">… reaches back to the “beginning of time” …</div><div class="zh">时间的起点（也就是全部历史）</div><div class="note">夸张说法，指从有数据的第一刻起，窗口无限长。</div></div>
+<div class="entry trap"><div class="en">put another way</div><div class="loc" data-p="271">… Put another way: if state changes …</div><div class="zh">换句话说</div></div>
+
+<h3 class="sec-head" id="s3.4">§3.4 <span class="first">Fault Tolerance</span></h3>
+<div class="entry trap"><div class="en">within the confines of</div><div class="loc" data-p="281">… Within the confines of the stream …</div><div class="zh">在……的范围之内</div><div class="note">confines 是边界、围墙：出了框架这道墙，它就管不着了。</div></div>
+<div class="entry trap"><div class="en">caveat</div><div class="loc" data-p="288">… Despite all those caveats, idempotent …</div><div class="zh">附加条件、要提防的前提</div><div class="note">caveat 是「但书」：用之前先看清的那几条限制。</div></div>
+<div class="entry"><div class="en">universally ideal</div><div class="loc" data-p="293">… No solution is universally ideal for …</div><div class="zh">在哪儿都最好</div></div>
+
+<h3 class="sec-head" id="s4">§4 <span class="first">Summary</span></h3>
+<div class="entry trap"><div class="en">from scratch</div><div class="loc" data-p="302">… by starting from scratch and consuming …</div><div class="zh">从零开始</div><div class="note">scratch 是赛跑时地上划的起跑线。</div></div>
+
+<div class="gate"><b>到这里先停下，去读原书</b><p>下面是读完再看的：你的预测对不对、几道换成你来选的判断题、值得细读的句子和理解检查。先看了，读书时就只是在找答案。</p></div>
+
+<h2>读完：回到你的预测</h2>
+<div class="payoff" data-bet="12-a"><div class="mine"></div>
+<p>答案是第二项（§3.2）。按处理时间开窗，一条心跳算进哪一分钟，看的是它什么时候到，不是什么时候发生。断网那 3 分钟里，那个地区的心跳一条也没到，每分钟只剩约 800；恢复后的那一分钟，平时的 1200 加上积压的 3×400，冲到约 2400。实际的心跳频率一直很平稳，图上的坑和尖峰都是统计方式造出来的。书里举的是流处理器重启、积压一批事件的情况，原理一样。想一想：换成按事件时间开窗、等待时间 1 分钟，那 3 分钟的数字会变成什么样？补来的心跳又会怎样？</p></div>
+<div class="payoff" data-bet="12-b"><div class="mine"></div>
+<p>答案是第三项（§1.2，§3.4）。日志式代理不逐条记确认，只定期记下每个消费者的偏移量；接手的消费者从最后记下的 1000 开始读，1000 到 1049 会再处理一遍。读消息不会删消息，所以也不会丢。「给余额加钱」不是幂等操作，做两遍就多加一次。§3.4 给的办法之一，是把触发这次写入的消息偏移量和余额一起存进数据库，重来时一看就知道这条已经处理过。想一想：如果这 50 条处理的是「把订单状态设成已发货」，重复处理还有害吗？</p></div>
+
+<h2>判断题：换成你来选</h2>
+<p class="lede">场景都是本站编的。先选，再看解释；解释里写了对应的节号，拿不准就回原书看那一节。</p>
+<p class="quiz-score"></p>
+<div class="mcq" data-answer="1"><div class="q">消费者加了一倍，积压为什么不降？<span class="sec">§1.2</span></div>
+  <p class="ctx">场景：订单事件写进一个日志式代理的主题，主题有 4 个分区，按商家 ID 分区。大促时积压越来越多，团队把消费者组从 4 个实例扩到 8 个，积压一点没降。</p>
+  <div class="opts"><button>继续扩到 16 个实例，总会降下来</button><button>增加主题的分区数；同一商家的事件仍按商家 ID 落在同一个分区</button><button>每个实例开大线程池，一个分区里的消息多线程并发处理</button><button>改成每处理一条就提交一次偏移量</button></div>
+  <div class="explain"><p>日志式代理按分区分活：一个分区在一个组里只交给一个消费者，所以并行度的上限就是分区数，多出来的 4 个实例在闲着，再加也一样。书里的建议是一个分区单线程处理，要更多并行就加分区。线程池能提速，但偏移量的管理会变复杂，分区内的顺序也保不住。逐条提交偏移量只会增加开销。</p></div></div>
+<div class="mcq" data-answer="3"><div class="q">搜索结果的价格为什么和详情页对不上？<span class="sec">§2.1</span><span class="sec">§2.2</span></div>
+  <p class="ctx">场景：商品服务改价格时先写 MySQL，再调用接口写 Elasticsearch。偶尔有商品在搜索结果里显示的价格和详情页不同，而且一直不自己恢复。查遍日志，两边的写入都返回了成功。</p>
+  <div class="opts"><button>给写 Elasticsearch 加上失败重试</button><button>调换顺序：先写 Elasticsearch，再写 MySQL</button><button>给 Elasticsearch 的写请求设一个更短的超时</button><button>应用不再写 Elasticsearch，改为从 MySQL 的变更日志按提交顺序同步过去</button></div>
+  <div class="explain"><p>两边都成功、却永久不一致，是双写的竞态：两次改价并发，两个系统收到的顺序相反。重试和超时针对的是写失败，这里没有失败；换个顺序，竞态照样存在。让数据库一处决定顺序，再用 CDC 按这个顺序同步，下游就和数据库一致了。</p></div></div>
+<div class="mcq" data-answer="0"><div class="q">队列为什么卡住了？怎么办？<span class="sec">§1.1</span></div>
+  <p class="ctx">场景：一个上游服务发版后，发出了一条少了必填字段的消息。消费者每次处理它都崩溃重启，代理没收到确认就把它重投给下一个消费者，后面的消息全堵着不动。</p>
+  <div class="opts"><button>处理失败若干次后把它挪进死信队列，并对死信队列设告警</button><button>关掉确认机制，代理一投出去就删掉</button><button>多加几个消费者分担</button><button>让代理严格按顺序投递</button></div>
+  <div class="explain"><p>书里讲过这个场景，常被叫作「毒消息」（poison message）：没有确认就重投，重投又让下一个消费者崩溃，无限循环；代理越讲究顺序，后面的消息越动不了。死信队列把它挪开，让队列继续走，再由人决定丢掉、修好重发还是改消费者代码。关掉确认会在正常崩溃时丢消息；加消费者只会让更多消费者崩溃。</p></div></div>
+<div class="mcq" data-answer="2"><div class="q">看板既要快，又要准，迟到的事件怎么处理？<span class="sec">§3.2</span></div>
+  <p class="ctx">场景：景区按事件时间每 5 分钟统计一次入园人数。部分闸机走 4G 上报，偶尔晚到几分钟。运营要求每个 5 分钟过去后尽快出数，财务月底对账要求数字准确。</p>
+  <div class="opts"><button>改用处理时间开窗，就不会有迟到的事件了</button><button>每个窗口等 1 小时再输出，保证收齐</button><button>等待时间设短一点，先出数；迟到的事件到了就发更正，同时统计迟到了多少</button><button>迟到的事件一律丢掉，反正比例不大</button></div>
+  <div class="explain"><p>书里给了两条路：忽略迟到的事件（记个数、多了就报警），或者发更正。这里两头都要，发更正最合适：看板先拿到一个及时的数，月底对账用更正后的数。按处理时间开窗只是把迟到的人算进了错误的时段；等 1 小时，看板就不及时了；一律丢掉，对账就不准。</p></div></div>
+<div class="mcq" data-answer="1"><div class="q">恢复之后，为什么有用户收到两条短信？<span class="sec">§3.4</span></div>
+  <p class="ctx">场景：一个 Flink 作业每处理一笔订单，就调用短信服务通知用户。作业崩溃后从最近的检查点恢复，有一部分用户收到了两条一样的短信。</p>
+  <div class="opts"><button>把检查点间隔从 1 分钟缩短到 5 秒</button><button>调短信服务时带上订单号，让它按订单号去重</button><button>改用微批处理</button><button>关掉检查点，崩溃了就从头处理</button></div>
+  <div class="explain"><p>检查点只能作废框架内部的输出，短信一旦发出去就收不回；从检查点重来，检查点之后处理过的订单又会发一遍。缩短间隔只能减少重复，不能消灭；微批有同样的问题；从头处理重复得更多。带上订单号让下游去重，等于把发短信变成幂等操作。</p></div></div>
+
+<h2>和本站其他书对照</h2>
+<div class="who">
+  <div><b>确认、超时和重传</b><span class="en">OSTEP 第 48 章</span>§1.1 的确认和重投，是可靠通信的老办法搬到了消息代理上。OSTEP 那一章从头讲了确认、超时重传，以及为什么重传会造成重复、要靠序列号认出来，正好对上这一章「没收到确认不代表没处理完」那个括号。<a class="go" href="/ostep/chapters/48-distributed.html">去那一页 →</a></div>
+  <div><b>幂等操作</b><span class="en">OSTEP 第 49 章</span>§3.4 靠幂等实现恰好一次。NFS 的客户端遇到任何失败都直接重试，前提是大多数请求是幂等的：带着确切偏移量的写，做几遍都一样。这和这一章「写入时带上消息偏移量」是同一个思路。<a class="go" href="/ostep/chapters/49-nfs.html">去那一页 →</a></div>
+</div>
+
+<h2>值得停下来的句子</h2>
+<blockquote class="quote">mutable state and an append-only log of immutable events do not contradict each other; they are two sides of the same coin.<cite>— §2.3。本站译：可变的状态和只追加、由不可变事件组成的日志并不矛盾，它们是一枚硬币的两面。</cite></blockquote>
+<p>这句话是全章的转折点。前半章把日志当成传消息的管道，到这里日志变成了数据本身：数据库存的当前状态，只是把日志从头算到尾的结果。有了这个视角，CDC、事件溯源、日志压缩、用变更日志做流和表的连接、从日志重建状态，都成了同一件事的不同用法。第 13 章的「拆开数据库」也从这里出发。</p>
+<blockquote class="quote">you can never be sure whether you have received all the events for a particular window or some are still to come.<cite>— §3.2。本站译：你永远无法确定，一个窗口的事件是已经全部收到了，还是有一些还在路上。</cite></blockquote>
+<p>批处理没有这个问题：文件读完了，数据就齐了。流处理的很多设计，从等待时间、更正、撤回，到给事件打三个时间戳，都是在跟这句话讨价还价。它没有正确答案，只有取舍：等得越久越完整，结果出得越晚。上面的模拟器就是让你亲手摸一摸这个取舍。</p>
+
+<h2>检查一下理解</h2>
+<details class="check"><summary>1.（§1.1）生产者发得比消费者处理得快，系统有哪三种选择？日志式代理属于哪一种？</summary><p>丢掉、缓冲、背压。日志式代理是一种缓冲，只是缓冲区在磁盘上，又大又固定；消费者落后太多，需要的消息已经过期删除，它就会错过这些消息。</p></details>
+<details class="check"><summary>2.（§1.1）负载均衡加上重投，为什么会打乱消息的顺序？</summary><p>一个消费者处理到一半崩溃，那条消息没确认，代理把它重投给另一个已经在处理后面消息的消费者，后面的消息就先处理完了。想保序，就给每个消费者一个单独的队列，不用负载均衡。</p></details>
+<details class="check"><summary>3.（§1.2）日志式代理为什么不用逐条记录确认？代价是什么？</summary><p>一个分区按顺序消费，偏移量之前的都处理过，之后的都没处理，代理只要定期记下偏移量。代价是消费者崩溃后从上次记下的位置重来，中间那些消息会被处理两遍。</p></details>
+<details class="check"><summary>4.（§2.2）CDC 的事件可以做日志压缩，事件溯源的事件为什么通常不行？</summary><p>CDC 的更新事件带着整条记录的新值，同一个主键只看最后一条就够。事件溯源记录的是用户的意图，后面的事件不覆盖前面的，要全部历史才能算出当前状态。</p></details>
+<details class="check"><summary>5.（§2.2 方框）发件箱模式看上去就是双写，为什么没有双写的问题？</summary><p>两次写都在同一个数据库里，可以放进同一个事务，要么都成功要么都失败。CDC 只读发件箱表，内部表的模式可以随便改。代价是要维护两套模式之间的转换，数据库也要多写一份数据。</p></details>
+<details class="check"><summary>6.（§3.1）复杂事件处理里，「查询」和「数据」的角色怎样和普通数据库反过来了？</summary><p>普通数据库长期存数据，查询来了查完就忘。CEP 长期存查询，每来一个事件就检查它是否让某个常设的查询匹配上了，匹配上了就发出一个「复杂事件」。</p></details>
+<details class="check"><summary>7.（§3.3）流和表的连接，为什么说本质上也是两条流的连接？</summary><p>流处理器在本地放一份表的副本，订阅这张表的变更日志来更新它。于是表那一边也是一条流，只是它的窗口一直延伸到最早的数据，新版本覆盖旧版本。</p></details>
+<details class="check"><summary>8.（§3.4）靠幂等写入做到恰好一次，有哪几个前提？</summary><p>重启后要按同样的顺序重放同样的消息（日志式代理做得到），处理要是确定性的，没有别的节点同时改同一个值；从一个节点切到另一个节点时，可能还要用防护令牌挡住假死的旧节点。</p></details>
+<p>用一句话说这一章（写给一个没读过的朋友）：</p>
+<textarea class="note" data-key="12-oneline" placeholder="比如：……"></textarea>
+
+<h2>精彩回顾</h2>
+<p class="recall-line"><b>一句话：</b>流处理是永远不结束的批处理；一条有序、能重放的日志，把消息、数据库和计算接在一起。</p>
+<div class="recall">
+  <div class="item"><b>读完就没了</b><p>传统代理确认后删除消息，新来的消费者看不到过去；日志式代理读只是挪偏移量，昨天的数据可以再处理一遍。</p><span class="sec">§1.2</span></div>
+  <div class="item"><b>分区数就是并行度</b><p>一个分区在组里只交给一个消费者。实例比分区多，多出来的就闲着；要更快，先加分区。</p><span class="sec">§1.2</span></div>
+  <div class="item"><b>信封背面算一算</b><p>书里粗算：一块大硬盘以最快速度写，也要大约 22 小时才写满。所以磁盘上的日志至少能缓冲这么久，实际常有几天到几周。</p><span class="sec">§1.2</span></div>
+  <div class="item"><b>没有报错的不一致</b><p>双写时两个并发修改在两个系统里顺序相反，两边都成功，却从此对不上。让数据库一处定顺序，下游跟着它的变更日志走。</p><span class="sec">§2.1</span></div>
+  <div class="item"><b>状态是日志的缓存</b><p>库存是入库出库单算出来的，积分是消费和兑换累加出来的。存下日志，状态随时能重建；真要删数据时，麻烦也在这里。</p><span class="sec">§2.3</span></div>
+  <div class="item"><b>窗口永远说不准齐没齐</b><p>按事件时间统计，总可能有一条还在路上。要么丢掉迟到的并计数，要么发更正；等得越久越完整，也越晚。</p><span class="sec">§3.2</span></div>
+  <div class="item"><b>恰好一次是效果上的一次</b><p>记录可能处理好几遍，只要输出看起来像一次。框架外的副作用收不回，得靠事务或幂等。</p><span class="sec">§3.4</span></div>
+</div>
+
+</main>
+<script>
+(() => {
+  const root = document.getElementById("sim-12"), h = window.DD.h;
+  const $ = (r) => root.querySelector(`[data-r="${r}"]`);
+  // 每个事件：[事件时间, 路上走了几秒, 是否来自断网后补发的网关]。时间是 12:00:00 以后的秒数，数据是本站编的
+  const RAW = [[5, 2], [14, 3], [52, 25], [31, 2], [48, 4], [55, 3], [63, 2], [108, 40], [78, 3], [89, 2], [97, 5], [104, 2], [112, 18], [118, 3], [126, 2], [133, 4],
+    [141, 2], [150, 3], [158, 2], [165, 4], [172, 3], [36, 150, 1], [59, 128, 1], [84, 104, 1], [181, 2], [188, 3], [196, 2], [205, 3], [214, 2], [226, 3], [238, 2], [247, 3]];
+  const EV = RAW.map(([e, d, g]) => ({ e, a: e + d, g: !!g })).sort((x, y) => x.a - y.a || x.e - y.e);
+  const N = EV.length;
+  let n = 0;
+  const ts = (t) => `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`;
+  const wname = (w, len) => (len === 60 ? `12:0${w}` : `12:0${w * 2}–12:0${w * 2 + 2}`);
+  const params = () => ({ wait: Number($("wait").value), len: Number($("len").value), fix: $("late").value === "fix" });
+  // 从头重算前 k 个事件：参数一改，按同样的到达顺序重放，不在旧状态上修补
+  function sim(k) {
+    const { wait, len, fix } = params();
+    const S = { maxE: -1, wm: null, win: {}, drop: 0, corr: 0, delays: [], msg: "" };
+    const W = (w) => S.win[w] || (S.win[w] = { w, evs: [], fired: null, count: 0, corr: 0 });
+    for (let i = 0; i < k; i++) {
+      const v = EV[i], w = Math.floor(v.e / len), x = W(w);
+      let m = `第 ${i + 1} 个事件：发生在 ${ts(v.e)}，到达时 ${ts(v.a)}` + (v.a - v.e >= 15 ? `，路上走了 ${v.a - v.e} 秒` : "") + (v.g ? "（断网的网关补发的）" : "") + "。";
+      if (x.fired) {
+        if (fix) { x.evs.push({ v, st: "fix" }); x.count++; x.corr++; S.corr++; m += `${wname(w, len)} 窗口已经在 ${ts(x.fired.at)} 输出过了：发一条更正，计数改成 ${x.count}。`; }
+        else { x.evs.push({ v, st: "drop" }); S.drop++; m += `${wname(w, len)} 窗口已经在 ${ts(x.fired.at)} 输出过了：丢掉。`; }
+      } else { x.evs.push({ v, st: "in" }); x.count++; m += `算进 ${wname(w, len)} 窗口（现在 ${x.count} 个）。`; }
+      if (v.e > S.maxE) S.maxE = v.e;
+      S.wm = S.maxE - wait;
+      const closed = [];
+      for (let c = 0; (c + 1) * len <= S.wm; c++) {
+        const y = W(c);
+        if (!y.fired) { y.fired = { at: v.a, count: y.count }; S.delays.push(v.a - (c + 1) * len); closed.push(`${wname(c, len)} 窗口输出 ${y.count}`); }
+      }
+      m += ` 水位线 ＝ ${ts(S.maxE)} − ${wait} 秒 ＝ ${wmText(S.wm)}。` + (closed.length ? closed.join("，") + "。" : "");
+      S.msg = m;
+    }
+    return S;
+  }
+  const wmText = (wm) => (wm == null ? "—" : wm < 0 ? "还没到 12:00" : ts(wm));
+  const firedN = (S) => Object.values(S.win).filter((x) => x.fired).length;
+  const avgDelay = (S) => (S.delays.length ? Math.round(S.delays.reduce((a, b) => a + b, 0) / S.delays.length) : null);
+  function lane(label, cells, status) {
+    return h("div", { class: "lane" }, h("span", { class: "lbl" }, label), ...cells, status ? h("span", { class: "pill" }, status) : null);
+  }
+  function render(say) {
+    const { len, fix } = params(), S = sim(n);
+    const st = $("stage"); st.textContent = "";
+    const arrived = EV.slice(0, n).map((v, i) => h("span", { class: `cell ${i === n - 1 ? "on" : ""}` }, ts(v.e)));
+    st.append(lane("到达顺序", arrived.length ? arrived : [h("span", { class: "pill" }, "还没有事件")], n < N ? `还有 ${N - n} 个在路上` : "数据放完了，但流不会结束"));
+    for (const x of Object.values(S.win).sort((a, b) => a.w - b.w)) {
+      const cells = x.evs.map(({ v, st: s }) => h("span", { class: `cell ${s === "drop" ? "bad" : s === "fix" ? "on" : x.fired ? "ok" : ""}` }, ts(v.e)));
+      const status = x.fired ? `${ts(x.fired.at)} 输出 ${x.fired.count}` + (x.corr ? `，更正 ${x.corr} 次 → ${x.count}` : "") + (x.evs.some((e) => e.st === "drop") ? `，丢了 ${x.evs.filter((e) => e.st === "drop").length} 个` : "")
+        : `等水位线过 ${ts((x.w + 1) * len)}`;
+      st.append(lane(`${wname(x.w, len)} 窗口`, cells, status));
+    }
+    const avg = avgDelay(S);
+    const stats = $("stats"); stats.textContent = "";
+    for (const [v, l] of [[`${n}/${N}`, "已到达的事件"], [wmText(S.wm), "水位线"], [firedN(S), "已输出的窗口"], [fix ? S.corr : S.drop, fix ? "发出的更正" : "丢掉的事件"], [avg == null ? "—" : `${avg} 秒`, "窗口结束后平均多久才输出"]])
+      stats.append(h("div", { class: "stat" }, h("div", { class: "v" }, String(v)), h("div", { class: "l" }, l)));
+    $("say").textContent = say || S.msg || "点「下一个事件」，一个一个看。";
+  }
+  const summary = () => {
+    const { fix } = params(), S = sim(n), avg = avgDelay(S);
+    return `${N} 个事件全部到达：输出了 ${firedN(S)} 个窗口，` + (fix ? `发了 ${S.corr} 条更正` : `丢掉 ${S.drop} 个事件`) + (avg == null ? "。还没有窗口输出：水位线还没越过第一个窗口的结束时刻。" : `，窗口结束后平均 ${avg} 秒才输出。`) + " 最后的窗口还在等更晚的事件把水位线推过去。";
+  };
+  const act = {
+    step: () => { if (n >= N) return "数据放完了。真实的流不会结束，剩下的窗口要等后面的事件把水位线推过去。"; n++; return null; },
+    five: () => { n = Math.min(N, n + 5); return null; },
+    all: () => { n = N; return summary(); },
+    reset: () => { n = 0; return "清空了。点「下一个事件」，一个一个看。"; },
+  };
+  root.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-a]"); if (!b) return;
+    render(act[b.dataset.a]());
+  });
+  for (const r of ["wait", "len", "late"]) $(r).addEventListener("change", () => render(n ? `参数改了：按同样的到达顺序，从头重算前 ${n} 个事件。` : null));
+  render();
+})();
+</script>
+</body>
+</html>

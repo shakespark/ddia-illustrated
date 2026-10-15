@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 14 章 · 做正确的事 · DDIA 导读</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/chapters.js"></script>
+<script src="../assets/sections.js"></script>
+<script src="../assets/dd.js"></script>
+</head>
+<body data-chapter="14">
+<main>
+
+<h2>这一章在做什么</h2>
+<div class="gist"><p>前十三章讲怎么把数据系统做得可靠、可扩展、好维护，这一章退一步问：这些系统对人做了什么。作者分两半讲。前一半是用数据替人做决定：贷款、招聘、保险里的预测模型会学到数据里的偏见，出了错难追责、难申诉，还可能形成越陷越深的回路。后一半是收集数据本身：追踪怎样变成监控，「同意」为什么常常不是真的自由，隐私这项权利又落到了谁手里。最后谈立法、行业自律，和工程师自己能做的事。</p></div>
+<figure class="fig"><img src="../assets/img/14-coalbrookdale.jpg" alt="一幅夜景油画：山谷里的炼铁炉喷出火光和浓烟，映红了半边天，前景有马车、铸铁件和行人" loading="lazy">
+<figcaption>Philip James de Loutherbourg 1801 年的油画《Coalbrookdale by Night》，画的是英格兰 Coalbrookdale 一带夜里的炼铁炉，现藏伦敦科学博物馆；Coalbrookdale 被看作工业革命的发源地之一。§2.5 里作者拿工业革命作比：它带来了长期的增长，也带来了污染和恶劣的劳动条件，过了很久才立起规矩。画与本书无关，是本站配的。<span class="src">Philip James de Loutherbourg，公有领域，维基共享资源</span></figcaption></figure>
+
+<h2>读之前：先预测</h2>
+<p>这一章没有新的技术。第 1 章 §4「数据系统、法律与社会」已经埋下伏笔：GDPR、被遗忘权、数据最小化，并说到第 14 章再深入。中间几章也一再碰到同一个问题：第 3 章的事件溯源、第 4 章 LSM 树的墓碑、第 12 章的不可变日志，都让「真正删掉一个人的数据」变得很难。第 11 到 13 章把各种来源的数据合并、派生成新的数据集，这一章 §2.2 正好指出，这类派生数据是用户最看不懂的。这是全书最后一章，后面没有章节再用到它；它回头问的是前面所有技术用在人身上时的后果。</p>
+
+<div class="bet" data-key="14-a">
+  <div class="q">一个招聘筛选模型，用公司过去十年的录用记录训练。为了不歧视，团队把「性别」这一列从训练数据里删掉了，其他列照旧（简历内容、学历、住址等）。上线以后，最可能出现什么情况？</div>
+  <div class="opts">
+    <button>模型看不到性别，就不可能按性别区别对待</button>
+    <button>少了一列关键信息，模型准确率大幅下降，没法用</button>
+    <button>模型仍可能借和性别相关的其他特征，把过去录用里的偏差学走，甚至放大</button>
+    <button>十年的数据量很大，个别偏差会被平均掉，样本越多越公平</button>
+  </div>
+  <textarea class="note" data-key="14-a-bet" placeholder="你为什么这么猜？一两句就行"></textarea>
+</div>
+
+<div class="bet" data-key="14-b">
+  <div class="q">一个面向欧盟用户的健身应用，第一次打开时弹窗：「同意把你的运动数据用于个性化广告」。弹窗上只有「同意」一个按钮，不同意就只能退出应用。一位用户点了同意。按书里引的 GDPR 条文，这算有效的同意吗？</div>
+  <div class="opts">
+    <button>算：是用户自己点的，条款也写在弹窗上</button>
+    <button>算：用户完全可以选择不用这个应用</button>
+    <button>不算：拒绝就用不了，这个同意不是自由给出的</button>
+    <button>不算：GDPR 禁止把运动数据用于任何广告</button>
+  </div>
+  <textarea class="note" data-key="14-b-bet" placeholder="你为什么这么猜？"></textarea>
+</div>
+
+<div class="crux"><p>数据系统存的、算的，很多是关于人的数据。造这些系统的工程师，能不能只管技术、不管它被怎么用？如果不能，伤害具体从哪里来：从用数据对人做的决定，还是从收集数据这件事本身？工程师手里又有什么可做的？</p></div>
+<ol class="qs">
+  <li>把决定交给基于数据的算法，为什么不一定比人更公平，而且出了错更难纠正？<span class="sec">§1.1</span><span class="sec">§1.2</span></li>
+  <li>作者为什么要把「数据收集」换成「监控」这个更重的词？用户和服务的关系在什么时候变了？<span class="sec">§2</span><span class="sec">§2.1</span></li>
+  <li>「用户点了同意」为什么在作者看来不能结束讨论？<span class="sec">§2.2</span></li>
+  <li>作者建议工程师先从哪里做起？<span class="sec">§2.6</span></li>
+</ol>
+
+<h2>这一章的骨架</h2>
+<p>这一章不是「问题 → 几种做法 → 各自代价」的技术章，而是一条论证：先讲用数据对人做决定会出什么事（§1），再讲收集数据本身有什么问题（§2），最后用工业革命作比，落到立法和自律（§2.5–§2.6）。容易乱的是 §2：监控、同意、隐私、权力四节一节接一节地推进，每一节都建立在上一节的结论上，读的时候记住每一节回答了什么，再进下一节。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 380" role="img" aria-label="这一章的骨架：工程师对后果的责任分成两块，一块是用数据对人做决定，下面是偏见、问责、反馈回路；另一块是收集数据本身，下面是监控、同意、隐私、数据即权力；最后是工业革命的类比和立法与自律">
+  <rect class="box" x="170" y="8" width="300" height="36" rx="8"/>
+  <text class="t-b" x="320" y="31" text-anchor="middle">工程师要为后果负责吗？§0</text>
+  <path class="ln" d="M320 44 V62 M160 62 H480 M160 62 V80 M480 62 V80"/>
+  <rect class="b-a" x="10" y="80" width="300" height="34" rx="6"/>
+  <text class="t-b" x="160" y="102" text-anchor="middle">用数据对人做决定 §1</text>
+  <rect class="b-a" x="330" y="80" width="300" height="34" rx="6"/>
+  <text class="t-b" x="480" y="102" text-anchor="middle">收集数据本身 §2</text>
+  <rect class="box" x="10" y="128" width="300" height="34" rx="6"/>
+  <text x="160" y="150" text-anchor="middle">模型会学到并放大偏见 §1.1</text>
+  <rect class="box" x="10" y="170" width="300" height="34" rx="6"/>
+  <text x="160" y="192" text-anchor="middle">算法出了错，谁负责、怎么申诉 §1.2</text>
+  <rect class="box" x="10" y="212" width="300" height="34" rx="6"/>
+  <text x="160" y="234" text-anchor="middle">预测反过来改变现实 §1.3</text>
+  <rect class="b-warn" x="10" y="254" width="300" height="34" rx="6"/>
+  <text x="160" y="276" text-anchor="middle">受影响的人：难申诉、难纠错</text>
+  <rect class="box" x="330" y="128" width="300" height="34" rx="6"/>
+  <text x="480" y="150" text-anchor="middle">追踪怎样变成监控 §2–§2.1</text>
+  <rect class="box" x="330" y="170" width="300" height="34" rx="6"/>
+  <text x="480" y="192" text-anchor="middle">「同意」是不是真的自由 §2.2</text>
+  <rect class="box" x="330" y="212" width="300" height="34" rx="6"/>
+  <text x="480" y="234" text-anchor="middle">隐私的决定权落到了谁手里 §2.3</text>
+  <rect class="box" x="330" y="254" width="300" height="34" rx="6"/>
+  <text x="480" y="276" text-anchor="middle">数据是资产，也是危险品 §2.4</text>
+  <path class="ln-d" d="M160 288 V310 M480 288 V310"/>
+  <rect class="b-ok" x="10" y="310" width="620" height="34" rx="6"/>
+  <text x="320" y="332" text-anchor="middle">工业革命的类比 §2.5 → 立法、行业自律、少收早删 §2.6</text>
+  <text class="t-m" x="10" y="370">每一格都问：受影响的是谁，谁说了算，出了错怎么办</text>
+</svg>
+<figcaption>本站画的全章结构。左边一列是 §1，右边一列是 §2；右边四格是一条链，后一格用到前一格的结论。</figcaption>
+</figure>
+<p class="lede">边读边填：每行一个问题，读到答案就写一两句。只存在你这台设备的浏览器里，别人看不到。</p>
+<div class="table-wrap"><table class="findit">
+  <tr><th>要找的</th><th>带着这个问题读，找到了就写下来</th></tr>
+  <tr><td>算法监狱</td><td><p class="q">被算法标成「有风险」的人，为什么比被一个人拒绝更难翻身？<span class="sec">§1</span></p><input class="note" data-key="14-f1" aria-label="算法监狱：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>代理特征</td><td><p class="q">法律不许按受保护特征区别对待，为什么模型不用这些列，也可能歧视？<span class="sec">§1.1</span></p><input class="note" data-key="14-f2" aria-label="代理特征：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>两种打分</td><td><p class="q">传统的信用分和基于机器学习的打分，各自在问什么问题？后者难在哪？<span class="sec">§1.2</span></p><input class="note" data-key="14-f3" aria-label="两种打分：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>谁是顾客</td><td><p class="q">什么情况下用户是服务的顾客？谁付钱会改变这一点？<span class="sec">§2</span></p><input class="note" data-key="14-f4" aria-label="谁是顾客：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>同意的漏洞</td><td><p class="q">作者对「用户自愿同意了」提出了哪几条反驳？<span class="sec">§2.2</span></p><input class="note" data-key="14-f5" aria-label="同意的漏洞：你的答案" placeholder="你的答案"></td></tr>
+  <tr><td>第一步</td><td><p class="q">作者建议工程师先从哪两件事做起？<span class="sec">§2.6</span></p><input class="note" data-key="14-f6" aria-label="第一步：你的答案" placeholder="你的答案"></td></tr>
+</table></div>
+<details class="reveal"><summary>读完了？对照我找到的</summary><ul>
+  <li>算法监狱：很多机构用相近的算法，一个「不」会在工作、保险、租房、金融各处同时出现；没有定罪的证据，也几乎没有申诉的机会。</li>
+  <li>代理特征：别的特征（如住址）和受保护特征高度相关；历史数据带着偏差，模型就会学到并放大它。</li>
+  <li>两种打分：信用分问「你过去怎么做」，记录错了还能改；预测问「像你的人过去怎么做」，输入更多更不透明；分错了组怎么办？数据错了更是几乎无处申诉。</li>
+  <li>谁是顾客：用户主动存数据、让服务替自己处理时是顾客；靠广告赚钱时，广告主才是顾客，用户的利益排第二。</li>
+  <li>同意的漏洞：追踪不一定是服务必需的；用户看不懂数据怎么被用，还牵连没同意的人；关系是单向的；不用的代价太高，退出不是真的自由。</li>
+  <li>第一步：一开始就少收；不再需要的数据就删掉，不要永久保存。</li>
+</ul></details>
+
+<h2>分节地图</h2>
+<p class="lede">全章约 6000 词，是全书最短的一章，没有代码，也没有图，建议分两次读。第一次讲用数据对人做决定，以及追踪怎样变成监控；第二次是一条连着的论证，从同意一路推到立法，最好一口气读完。最后的小结是全书回顾。</p>
+<ol class="secmap">
+  <li class="sit">第一次坐下<span>§0–§2.1 · 约 2700 词 · 用数据给人做决定，以及追踪怎样变成监控</span></li>
+  <li data-sec="0"><b>In the final chapter of this…<span class="w">约 400 词</span></b><span class="cn">开篇</span><span class="what">全书最后一章换了一个角度：系统的后果谁来想？伦理为什么不像技术那样能定义清楚。</span></li>
+  <li data-sec="1"><b>Predictive Analytics<span class="w">约 300 词</span></b><span class="cn">预测分析</span><span class="what">预测天气和预测一个人会不会违约，差别在哪？「算法监狱」指的是什么。</span></li>
+  <li data-sec="1.1"><b>Bias and Discrimination<span class="w">约 300 词</span></b><span class="cn">偏见与歧视</span><span class="what">基于数据的决定会不会比人更公平？去掉敏感的特征够不够。</span></li>
+  <li data-sec="1.2"><b>Responsibility and Accountability<span class="w">约 500 词</span></b><span class="cn">责任与问责</span><span class="what">算法出错谁负责？两种打分方式的区别，统计结论为什么管不了个人。</span></li>
+  <li data-sec="1.3"><b>Feedback Loops<span class="w">约 300 词</span></b><span class="cn">反馈回路</span><span class="what">预测怎样反过来改变它要预测的东西；作者推荐的一种思考方式。</span></li>
+  <li data-sec="2"><b>Privacy and Tracking<span class="w">约 300 词</span></b><span class="cn">隐私与追踪</span><span class="what">收集数据本身有什么问题？用户什么时候是顾客，什么时候不是。</span></li>
+  <li data-sec="2.1"><b>Surveillance<span class="w">约 500 词</span></b><span class="cn">监控</span><span class="what">一个把「数据」换成「监控」的思想实验，作者为什么用这么重的词。</span></li>
+  <li class="sit">第二次坐下<span>§2.2–§3 · 约 3400 词 · 同意、隐私、数据的权力，和出路</span></li>
+  <li data-sec="2.2"><b>Consent and Freedom of Choice<span class="w">约 700 词</span></b><span class="cn">同意与选择的自由</span><span class="what">「用户同意了」能不能结束讨论？作者的几条反驳，和书里引的 GDPR 条文。</span></li>
+  <li data-sec="2.3"><b>Privacy and Use of Data<span class="w">约 700 词</span></b><span class="cn">隐私与数据的使用</span><span class="what">隐私到底是一种什么权利？数据被收走以后，这项权利落到了谁手里。</span></li>
+  <li data-sec="2.4"><b>Data as Assets and Power<span class="w">约 500 词</span></b><span class="cn">数据是资产，也是权力</span><span class="what">数据为什么值钱，又为什么危险；收集时要把哪些将来的风险算进去。</span></li>
+  <li data-sec="2.5"><b>Remembering the Industrial Revolution<span class="w">约 400 词</span></b><span class="cn">回想工业革命</span><span class="what">拿工业革命的污染和劳工问题作比，作者想借它说明什么。</span></li>
+  <li data-sec="2.6"><b>Legislation and Self-Regulation<span class="w">约 500 词</span></b><span class="cn">立法与自律</span><span class="what">数据保护法能做到什么、做不到什么；工程师自己可以从哪里开始。</span></li>
+  <li data-sec="3"><b>Summary<span class="w">约 500 词</span></b><span class="cn">小结</span><span class="what">全书回顾。先自己把十四章各回忆一句，再读它。</span></li>
+</ol>
+
+<h2>先用中文过一遍</h2>
+<p>这一章讲的是论证，不是机制。下面四段把作者的几条主要论证摊开：每一条立在什么前提上、往哪一步推。结论留给原书。</p>
+
+<h3>删掉一列，偏见还在</h3>
+<p>反歧视法不许按族裔、性别、年龄、信仰这类受保护特征区别对待人。最直接的想法是：训练数据里不放这些列就行了。作者指出这里有两个漏洞。第一，别的特征常常和受保护特征高度相关，模型用不着看到那一列，也能借这些「代理」把人分开。第二，预测模型的规则不是人写下来的，是从历史数据里归纳出来的；如果历史上的决定本来就有偏差，模型会把偏差当成规律学走，而且学到的东西不透明，说不清为什么。下图是本站编的招聘例子。读 §1.1 时留意作者怎么回应「让数据来决定会比人更客观」这个期望。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 260" role="img" aria-label="删掉性别这一列之后：简历空档期、参加过的社团、住处离公司多远这几个输入特征仍和性别高度相关；模型以带偏差的历史录用结果为学习目标，输出的推荐名单重现了偏差">
+  <defs><marker id="m14a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <rect class="ln-d" x="10" y="122" width="120" height="56" rx="6"/>
+  <text class="t-b" x="70" y="145" text-anchor="middle">性别</text>
+  <text class="t-m" x="70" y="166" text-anchor="middle">这一列删掉了</text>
+  <path class="ln-d" d="M130 140 L168 117 M130 150 L168 162 M130 160 L168 207"/>
+  <text class="t-m" x="10" y="208">和它高度相关</text>
+  <text class="t-b" x="255" y="88" text-anchor="middle">输入特征</text>
+  <rect class="box" x="170" y="100" width="170" height="34" rx="6"/>
+  <text x="255" y="122" text-anchor="middle">简历里的空档期</text>
+  <rect class="box" x="170" y="145" width="170" height="34" rx="6"/>
+  <text x="255" y="167" text-anchor="middle">参加过的社团</text>
+  <rect class="box" x="170" y="190" width="170" height="34" rx="6"/>
+  <text x="255" y="212" text-anchor="middle">住处离公司多远</text>
+  <rect class="b-bad" x="360" y="10" width="170" height="48" rx="6"/>
+  <text x="445" y="30" text-anchor="middle">历史录用结果</text>
+  <text class="t-m" x="445" y="49" text-anchor="middle">当年的偏差也在里面</text>
+  <path class="ln" d="M445 58 V122" marker-end="url(#m14a)"/>
+  <text class="t-m" x="452" y="95">学习目标</text>
+  <path class="ln" d="M340 117 L378 142 M340 162 L378 152 M340 207 L378 162" marker-end="url(#m14a)"/>
+  <rect class="b-a" x="380" y="125" width="120" height="50" rx="6"/>
+  <text class="t-b" x="440" y="146" text-anchor="middle">筛选模型</text>
+  <text class="t-m" x="440" y="165" text-anchor="middle">自己归纳规则</text>
+  <path class="ln-a" d="M500 150 H526" marker-end="url(#m14a)"/>
+  <rect class="b-warn" x="530" y="125" width="100" height="50" rx="6"/>
+  <text x="580" y="146" text-anchor="middle">推荐名单</text>
+  <text class="t-m" x="580" y="165" text-anchor="middle">偏差重现</text>
+  <text class="t-m" x="10" y="250">删掉一列，挡不住和它相关的那几列；学习目标里的偏差，模型照单全收。</text>
+</svg>
+<figcaption>本站编的例子，特征和数据都是假设的。书里举的代理特征是另一种（§1.1、§1.2），读到时对照一下。</figcaption>
+</figure>
+
+<h3>预测会改变它要预测的东西</h3>
+<p>天气预报不会改变天气，但给人打分会改变这个人的处境。分数决定了能得到什么机会，机会又决定了下一轮留下什么数据。于是模型下一轮看到的「事实」，有一部分是它自己上一轮的决定造成的：一开始的小差距，被一圈一圈放大。作者把这叫做自我强化的反馈回路。作者也承认这种回路不是总能预见；但把整个系统，连同和它打交道的人一起考虑，能预见不少后果。这种思考方式叫系统思维。下图是本站编的例子，书里用的是另外两个。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 290" role="img" aria-label="反馈回路：新创作者曝光少，点击就少，数据显示不受欢迎，模型给的推荐分更低，下一轮分到的曝光更少，回到起点">
+  <defs><marker id="m14b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <rect class="b-a" x="210" y="10" width="220" height="40" rx="6"/>
+  <text x="320" y="35" text-anchor="middle">新创作者：曝光少</text>
+  <rect class="box" x="420" y="110" width="210" height="40" rx="6"/>
+  <text x="525" y="135" text-anchor="middle">点击少，数据显示「不受欢迎」</text>
+  <rect class="b-bad" x="210" y="210" width="220" height="40" rx="6"/>
+  <text x="320" y="235" text-anchor="middle">模型给的推荐分更低</text>
+  <rect class="box" x="10" y="110" width="200" height="40" rx="6"/>
+  <text x="110" y="135" text-anchor="middle">下一轮分到的曝光更少</text>
+  <path class="ln-a" d="M430 30 Q525 30 525 106" marker-end="url(#m14b)"/>
+  <path class="ln-a" d="M525 150 Q525 230 434 230" marker-end="url(#m14b)"/>
+  <path class="ln-a" d="M210 230 Q110 230 110 154" marker-end="url(#m14b)"/>
+  <path class="ln-a" d="M110 110 Q110 30 206 30" marker-end="url(#m14b)"/>
+  <text class="t-m" x="320" y="122" text-anchor="middle">模型看到的数据，</text>
+  <text class="t-m" x="320" y="142" text-anchor="middle">是它自己上一轮的决定造成的</text>
+  <text class="t-m" x="320" y="162" text-anchor="middle">作品本身好不好，回路里没人问</text>
+  <text class="t-m" x="10" y="280">一个视频平台按过去的点击率分配曝光（本站编的例子）。转一圈，数字更差一点。</text>
+</svg>
+<figcaption>本站画的示意图。读 §1.3 时问一句作者问的话：这个系统是在放大人和人之间已有的差距，还是在缩小它？</figcaption>
+</figure>
+
+<h3>谁付钱，谁就是顾客</h3>
+<p>§2 把「收集数据」本身拿出来审视，先问：收数据的一方和被收数据的人是什么关系？用户自己把数据存进去，让服务按自己的意思存、按自己的意思算，这时服务是在替用户办事，用户就是顾客。行为在使用过程中被顺手记下来时，关系就不那么清楚了：服务开始有了自己的利益。作者承认有些追踪确实让用户受益，比如用点击改进搜索排序。但如果服务靠广告赚钱，付钱的是广告主，追踪会越来越细、保存越来越久，为的是给每个人建详细的画像。作者认为，这时的关系可以用一个更重的词来描述：监控。</p>
+<figure class="fig">
+<svg class="diagram" viewBox="0 0 640 270" role="img" aria-label="两种关系的对比：左边用户主动交给服务数据，服务替用户处理，用户是顾客；右边用户的行为被记录，汇成画像，广告主按画像投放并为此付钱，广告主才是顾客">
+  <defs><marker id="m14c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="f-muted" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+  <text class="t-b" x="10" y="20">用户是顾客</text>
+  <rect class="b-ok" x="10" y="40" width="110" height="40" rx="6"/>
+  <text x="65" y="65" text-anchor="middle">用户</text>
+  <rect class="box" x="180" y="40" width="120" height="40" rx="6"/>
+  <text x="240" y="65" text-anchor="middle">服务</text>
+  <path class="ln" d="M120 52 H176" marker-end="url(#m14c)"/>
+  <path class="ln" d="M180 70 H124" marker-end="url(#m14c)"/>
+  <text class="t-m" x="10" y="112">用户主动交给它数据，</text>
+  <text class="t-m" x="10" y="130">让它替自己存、替自己算。</text>
+  <text class="t-m" x="10" y="148">服务做的是用户要它做的事。</text>
+  <path class="ln-d" d="M315 10 V260"/>
+  <text class="t-b" x="330" y="20">广告付钱的时候</text>
+  <rect class="b-ok" x="330" y="40" width="100" height="40" rx="6"/>
+  <text x="380" y="65" text-anchor="middle">用户</text>
+  <rect class="box" x="480" y="40" width="150" height="40" rx="6"/>
+  <text x="555" y="65" text-anchor="middle">免费的服务</text>
+  <path class="ln" d="M430 52 H476" marker-end="url(#m14c)"/>
+  <text class="t-m" x="447" y="46">①</text>
+  <path class="ln-d" d="M480 70 H434" marker-end="url(#m14c)"/>
+  <rect class="b-bad" x="330" y="170" width="100" height="40" rx="6"/>
+  <text x="380" y="195" text-anchor="middle">画像</text>
+  <rect class="b-warn" x="480" y="170" width="150" height="40" rx="6"/>
+  <text x="555" y="195" text-anchor="middle">广告主</text>
+  <path class="ln" d="M505 80 L400 166" marker-end="url(#m14c)"/>
+  <text class="t-m" x="462" y="126">②</text>
+  <path class="ln" d="M430 190 H476" marker-end="url(#m14c)"/>
+  <text class="t-m" x="447" y="184">③</text>
+  <path class="ln-a" d="M600 170 V84" marker-end="url(#m14c)"/>
+  <text class="t-a" x="606" y="132">付钱</text>
+  <text class="t-m" x="330" y="236">① 使用时的行为被顺手记下　② 汇成画像</text>
+  <text class="t-m" x="330" y="256">③ 按画像投放广告，广告主为此付钱</text>
+  <text class="t-m" x="10" y="236">数据只为用户自己的目的服务</text>
+</svg>
+<figcaption>本站画的示意图。右边那条从服务指回用户的虚线，是「尽量让你多用」的免费服务；作者说用户在这种关系里被引着尽可能多地使用它（§2）。</figcaption>
+</figure>
+
+<h3>隐私是「由谁来决定」的问题</h3>
+<p>有人说，很多人愿意把生活里的大事小事都晒到社交网络上，可见隐私已经无所谓了。作者认为这是把隐私理解成了「保密」。在作者的定义里，隐私是一种决定权：每个人自己决定什么告诉谁、什么公开、什么不说，在保密和公开之间自己选位置。按这个定义，数据被大规模收走时，隐私并没有消失，而是这项决定权从个人手里转到了收数据的公司手里，由公司按自己的利益去行使。§2.3 后面关于广告定向、隐私设置的讨论，§2.4 关于数据和权力的讨论，都建立在这个定义上。</p>
+<figure class="fig"><img src="../assets/img/14-schneier.jpg" alt="一位留着花白胡子的男子的面部特写，戴着头戴式麦克风，背景是深色的" loading="lazy">
+<figcaption>Bruce Schneier，2013 年在瑞士洛桑联邦理工学院的「隐私与监控大会」上。书里两次引他的话：一次说装上将来可能方便警察国家的技术是糟糕的「公民卫生」（§2.4），一次把数据比作信息时代的污染（§2.5）。照片经本站裁切。<span class="src">Rama，CC BY-SA 2.0 fr，维基共享资源</span></figcaption></figure>
+
+<div class="table-wrap"><table class="terms">
+  <tr><th>英文</th><th>中文</th><th>一句话</th></tr>
+  <tr><td>predictive analytics</td><td>预测分析</td><td>用历史数据预测某个人将来会怎样，并据此对这个人做决定（§1）。</td></tr>
+  <tr><td>algorithmic prison</td><td>算法监狱</td><td>被算法标成有风险以后，在求职、保险、租房等许多方面被系统性地挡在外面（§1）。</td></tr>
+  <tr><td>protected trait</td><td>受保护特征</td><td>反歧视法不许据以区别对待的特征，如族裔、年龄、性别、残障、信仰（§1.1）。</td></tr>
+  <tr><td>proxy</td><td>代理特征</td><td>本身不是受保护特征，却和它高度相关，模型借它能间接做出同样的区分（§1.2）。</td></tr>
+  <tr><td>feedback loop</td><td>反馈回路</td><td>系统的输出改变了人的处境，处境又成了系统新的输入，一圈圈自我强化（§1.3）。</td></tr>
+  <tr><td>echo chamber</td><td>回音室</td><td>推荐只给人看自己已经认同的观点，刻板印象和极化在里面滋长（§1.3）。</td></tr>
+  <tr><td>systems thinking</td><td>系统思维</td><td>把整个系统连同和它打交道的人一起考虑，预判它的后果（§1.3）。</td></tr>
+  <tr><td>surveillance</td><td>监控</td><td>作者用这个更重的词，指主要为广告主而不是为用户本人服务的大规模追踪（§2）。</td></tr>
+  <tr><td>GDPR</td><td><a class="term" href="../glossary.html#g-gdpr">《通用数据保护条例》</a></td><td>欧盟的数据保护法规。书里引了它关于同意（§2.2）、目的限定和最小化（§2.6）的条文。</td></tr>
+  <tr><td>consent</td><td>同意</td><td>处理个人数据的一种合法依据；按书里引的 GDPR 条文，要自由给出、具体、知情、明确（§2.2）。</td></tr>
+  <tr><td>legitimate interest</td><td>正当利益</td><td>GDPR 下同意以外的合法依据之一，书里举的例子是防欺诈（§2.2）。</td></tr>
+  <tr><td>data exhaust</td><td>数据废气</td><td>把行为数据看成使用服务时排出的废料的说法；作者认为应该反过来看（§2.4）。</td></tr>
+  <tr><td>data broker</td><td>数据经纪商</td><td>收购、汇总、分析并转卖个人数据的公司，多半用于营销（§2.4）。</td></tr>
+  <tr><td>data minimization</td><td><a class="term" href="../glossary.html#g-data-minimization">数据最小化</a></td><td>只为明确的目的收集必要的数据，不再需要就删（§2.6）。</td></tr>
+  <tr><td>tragedy of the commons</td><td>公地悲剧</td><td>人人可用、无人看护的公共资源终会被耗尽；作者拿它比个人对自己数据的控制权（§2.6）。</td></tr>
+</table></div>
+
+<h2>词与短语</h2>
+<p class="lede">词条按在书里出现的顺序排，按节分组；读一节之前先把这一节的过一遍，读的时候就不用停。斜体小字是原句里连续的几个词，在电子书里搜它就能找到那一句。标着「每个字都认识」的，是字面意思会把你带偏的。行话（compaction、quorum 这类）不在这里，在上面的术语表里。</p>
+
+<h3 class="sec-head" id="s0">§0 <span class="first">In the final chapter of this…</span></h3>
+<div class="entry trap"><div class="en">take a step back</div><div class="loc" data-p="3">… let’s take a step back. …</div><div class="zh">退一步（跳出细节看全局）</div><div class="note">不是「让步」。前十三章都在技术细节里，这一章站远一点看。</div></div>
+<div class="entry trap"><div class="en">cavalier</div><div class="loc" data-p="6">… take a cavalier attitude to privacy …</div><div class="zh">满不在乎的、轻率的</div><div class="note">名词本义是骑士，形容词却是「傲慢随便、不当回事」。</div></div>
+<div class="entry"><div class="en">ours to bear</div><div class="loc" data-p="7">… responsibility is ours to bear; …</div><div class="zh">该由我们来承担</div></div>
+<div class="entry"><div class="en">entail</div><div class="loc" data-p="8">… What does this entail? …</div><div class="zh">意味着（要做些什么）</div></div>
+<div class="entry"><div class="en">go through a checklist</div><div class="loc" data-p="8">… is not going through a checklist …</div><div class="zh">对着清单逐项打勾</div></div>
+
+<h3 class="sec-head" id="s1">§1 <span class="first">Predictive Analytics</span></h3>
+<div class="entry"><div class="en">fraught with</div><div class="loc" data-p="9">… is fraught with ethical dilemmas. …</div><div class="zh">充满（难题、风险）</div></div>
+<div class="entry trap"><div class="en">X is one thing; Y is another matter</div><div class="loc" data-p="9">… is one thing; it is another matter …</div><div class="zh">X 是一回事，Y 就是另一回事了</div><div class="note">句式重心在后半：后面那件事要严重得多。</div></div>
+<div class="entry"><div class="en">if in doubt</div><div class="loc" data-p="10">… If in doubt, they are …</div><div class="zh">拿不准的时候</div></div>
+<div class="entry trap"><div class="en">better off</div><div class="loc" data-p="10">… are better off saying no. …</div><div class="zh">（这样做）对自己更有利</div><div class="note">不是「更富有」。be better off doing 是「还不如……」。</div></div>
+<div class="entry trap"><div class="en">appeal</div><div class="loc" data-p="11">… with little chance of appeal. …</div><div class="zh">申诉、上诉</div><div class="note">不是「吸引力」。这一章 appeal 多次出现，都是这个意思。</div></div>
+
+<h3 class="sec-head" id="s1.1">§1.1 <span class="first">Bias and Discrimination</span></h3>
+<div class="entry trap"><div class="en">put like this</div><div class="loc" data-p="14">… Put like this, it seems ridiculous …</div><div class="zh">这么一说</div><div class="note">把前面的话换个说法摆出来，荒谬之处就一目了然。</div></div>
+<div class="entry trap"><div class="en">money laundering for bias</div><div class="loc" data-p="14">… is like money laundering for bias …</div><div class="zh">给偏见洗钱</div><div class="note">带偏见的数据进去，出来的结论看起来干净客观。作者用 satirized 表明这是别人的讽刺说法。</div></div>
+<div class="entry"><div class="en">moral imagination</div><div class="loc" data-p="15">… moral imagination is required, …</div><div class="zh">道德想象力（想象一个比过去更好的样子）</div></div>
+
+<h3 class="sec-head" id="s1.2">§1.2 <span class="first">Responsibility and Accountability</span></h3>
+<div class="entry"><div class="en">be held accountable</div><div class="loc" data-p="16">… they can be held accountable, …</div><div class="zh">被追究责任</div></div>
+<div class="entry"><div class="en">recourse</div><div class="loc" data-p="16">… is there any recourse? …</div><div class="zh">补救、求助的途径</div></div>
+<div class="entry trap"><div class="en">come under</div><div class="loc" data-p="16">… system comes under judicial review, …</div><div class="zh">受到（审查、批评）</div><div class="note">come under fire 是「受到抨击」，同一个用法。</div></div>
+<div class="entry trap"><div class="en">do not make this easy</div><div class="loc" data-p="17">… normally do not make this easy) …</div><div class="zh">（往轻里说）很难办成</div><div class="note">字面是「不让这事变容易」，要反着读：纠错往往很费劲。</div></div>
+<div class="entry trap"><div class="en">put in the wrong bucket</div><div class="loc" data-p="18">… get put in the wrong bucket? …</div><div class="zh">被分错了组</div><div class="note">bucket 在技术英文里常指「分组、类别」，不是水桶。</div></div>
+<div class="entry trap"><div class="en">drop dead</div><div class="loc" data-p="19">… expected to drop dead on your …</div><div class="zh">猝然倒下死去</div><div class="note">口语，带点调侃：平均寿命 80 岁，不等于你会在 80 岁生日那天倒下。</div></div>
+<div class="entry trap"><div class="en">may well</div><div class="loc" data-p="19">… may well be wrong in individual cases.</div><div class="zh">很可能</div><div class="note">well 在这里加强可能性，不是「好」。</div></div>
+<div class="entry trap"><div class="en">positively</div><div class="loc" data-p="20">… but also positively dangerous. …</div><div class="zh">简直、确确实实地</div><div class="note">熟词生义：不是「积极地」，是加强语气。</div></div>
+<div class="entry trap"><div class="en">predatory</div><div class="loc" data-p="21">… used by predatory businesses seeking to …</div><div class="zh">掠夺性的（专挑弱势者下手的）</div><div class="note">predatory lending 是「掠夺性放贷」。</div></div>
+
+<h3 class="sec-head" id="s1.3">§1.3 <span class="first">Feedback Loops</span></h3>
+<div class="entry trap"><div class="en">breed</div><div class="loc" data-p="22">… and polarization can breed. …</div><div class="zh">滋生、蔓延</div><div class="note">不及物用法，像细菌一样繁殖。</div></div>
+<div class="entry"><div class="en">pernicious</div><div class="loc" data-p="23">… particularly pernicious problems arise …</div><div class="zh">有害的（不知不觉地坏事）</div></div>
+<div class="entry"><div class="en">downward spiral</div><div class="loc" data-p="23">… It’s a downward spiral due to …</div><div class="zh">每况愈下的恶性循环</div></div>
+<div class="entry trap"><div class="en">camouflage</div><div class="loc" data-p="23">… behind a camouflage of mathematical rigor …</div><div class="zh">伪装、幌子</div><div class="note">数学和数据的严谨只是外衣，底下是有毒的假设。</div></div>
+<div class="entry"><div class="en">collude</div><div class="loc" data-p="24">… the algorithms learned to collude. …</div><div class="zh">串通（操纵价格）</div></div>
+
+<h3 class="sec-head" id="s2">§2 <span class="first">Privacy and Tracking</span></h3>
+<div class="entry trap"><div class="en">take on</div><div class="loc" data-p="27">… it takes on interests of its own, …</div><div class="zh">带上、生出（某种性质）</div><div class="note">不是「承担」：服务开始有了自己的利益。</div></div>
+<div class="entry trap"><div class="en">take second place</div><div class="loc" data-p="29">… interests take second place. …</div><div class="zh">退居其次</div></div>
+<div class="entry"><div class="en">coax into</div><div class="loc" data-p="30">… is coaxed into engaging with it …</div><div class="zh">被哄着去（做某事）</div></div>
+<div class="entry"><div class="en">sinister connotations</div><div class="loc" data-p="30">… more sinister connotations: …</div><div class="zh">阴暗的言外之意</div></div>
+
+<h3 class="sec-head" id="s2.1">§2.1 <span class="first">Surveillance</span></h3>
+<div class="entry trap"><div class="en">polemic</div><div class="loc" data-p="32">… unusually polemic for this book, …</div><div class="zh">论战性的、措辞激烈的</div><div class="note">作者自己点明：这种写法在这本书里少见。紧接着那个书名的改写是故意的玩笑。</div></div>
+<div class="entry trap"><div class="en">eat the world</div><div class="loc" data-p="32">… make software “eat the world”, …</div><div class="zh">（让软件）吞噬世界</div><div class="note">出自 Marc Andreessen 2011 年的文章 Why Software Is Eating the World，指软件进入并改造各行各业。</div></div>
+<div class="entry trap"><div class="en">could only dream of</div><div class="loc" data-p="34">… could only dream of putting a microphone …</div><div class="zh">只能想想（实际做不到）</div><div class="note">不是「梦想」：过去最极端的政权也做不到的事，今天成了常态。</div></div>
+<div class="entry trap"><div class="en">nothing to hide</div><div class="loc" data-p="35">… you feel you have nothing to hide …</div><div class="zh">没什么要藏的</div><div class="note">常见的辩解。作者紧接着把它拆开：这句话的前提是你恰好不属于会被找麻烦的那群人。</div></div>
+<div class="entry trap"><div class="en">in line with</div><div class="loc" data-p="35">… totally in line with existing power …</div><div class="zh">和……一致、顺着……</div></div>
+<div class="entry trap"><div class="en">hold sway over</div><div class="loc" data-p="36">… hold sway over important aspects …</div><div class="zh">左右、支配</div><div class="note">sway 是摇摆，也是「影响力、统治」。</div></div>
+<div class="entry trap"><div class="en">work out</div><div class="loc" data-p="36">… to work out what you are typing …</div><div class="zh">推算出、弄清楚</div><div class="note">不是「锻炼」，虽然说的正好是健身手环。</div></div>
+
+<h3 class="sec-head" id="s2.2">§2.2 <span class="first">Consent and Freedom of Choice</span></h3>
+<div class="entry trap"><div class="en">do more to obscure than to illuminate</div><div class="loc" data-p="39">… do more to obscure than to illuminate …</div><div class="zh">与其说讲清楚了，不如说搅糊涂了</div></div>
+<div class="entry trap"><div class="en">presumably</div><div class="loc" data-p="42">… which fraudsters would presumably not consent …</div><div class="zh">想必、大概</div><div class="note">作者的冷幽默：骗子当然不会同意别人拿数据来防他。</div></div>
+<div class="entry trap"><div class="en">effectively</div><div class="loc" data-p="43">… its use is effectively mandatory. …</div><div class="zh">实际上、事实上</div><div class="note">熟词生义：不是「有效地」。法律上没强制，实际上不用不行。</div></div>
+<div class="entry"><div class="en">easier said than done</div><div class="loc" data-p="44">… is easier said than done. …</div><div class="zh">说起来容易做起来难</div></div>
+<div class="entry"><div class="en">miss out on</div><div class="loc" data-p="44">… afford to potentially miss out on social …</div><div class="zh">错过（机会）</div></div>
+
+<h3 class="sec-head" id="s2.3">§2.3 <span class="first">Privacy and Use of Data</span></h3>
+<div class="entry trap"><div class="en">creepy</div><div class="loc" data-p="49">… would be perceived as creepy …</div><div class="zh">让人发毛的、瘆人的</div><div class="note">形容被人悄悄盯着的不舒服感，讨论隐私时极常用。</div></div>
+<div class="entry trap"><div class="en">be down to</div><div class="loc" data-p="51">… is of course down to human judgment; …</div><div class="zh">取决于、由……来定</div><div class="note">不是「往下」。it’s down to you 是「由你决定」。</div></div>
+<div class="entry"><div class="en">oblivious to</div><div class="loc" data-p="51">… algorithms are oblivious to such notions …</div><div class="zh">对……浑然不觉</div></div>
+<div class="entry"><div class="en">unfettered</div><div class="loc" data-p="52">… still has unfettered access to the data …</div><div class="zh">不受约束的</div><div class="note">fetter 是脚镣。</div></div>
+
+<h3 class="sec-head" id="s2.4">§2.4 <span class="first">Data as Assets and Power</span></h3>
+<div class="entry"><div class="en">lure into</div><div class="loc" data-p="55">… a means to lure users into …</div><div class="zh">引诱（某人）去做</div></div>
+<div class="entry trap"><div class="en">cynically</div><div class="loc" data-p="55">… are cynically exploited by the data …</div><div class="zh">唯利是图地、别有用心地</div><div class="note">不是「愤世嫉俗地」，指利用别人的好东西为自己牟利而毫无顾忌。</div></div>
+<div class="entry trap"><div class="en">eyeballs</div><div class="loc" data-p="56">… user numbers, or “eyeballs” …</div><div class="zh">眼球（用户的关注量）</div><div class="note">互联网行话，作者紧接着把它换成「监控能力」。</div></div>
+<div class="entry"><div class="en">disconcertingly</div><div class="loc" data-p="57">… breaches happen disconcertingly often. …</div><div class="zh">令人不安地</div></div>
+<div class="entry"><div class="en">no qualms about</div><div class="loc" data-p="58">… has no qualms about compelling us …</div><div class="zh">毫无顾忌地（做某事）</div></div>
+<div class="entry trap"><div class="en">civic hygiene</div><div class="loc" data-p="59">… It is poor civic hygiene to …</div><div class="zh">公民卫生（公共生活的基本防范）</div><div class="note">Schneier 的比喻：像个人卫生一样，是平时就该养成的习惯，不是出了事才补。</div></div>
+<div class="entry"><div class="en">adage</div><div class="loc" data-p="60">… as the old adage goes. …</div><div class="zh">格言、老话</div></div>
+
+<h3 class="sec-head" id="s2.5">§2.5 <span class="first">Remembering the Industrial Revolution</span></h3>
+<div class="entry"><div class="en">live in splendor</div><div class="loc" data-p="62">… Factory owners lived in splendor, …</div><div class="zh">过着豪奢的生活</div></div>
+<div class="entry trap"><div class="en">fester</div><div class="loc" data-p="65">… It stays around, festering. …</div><div class="zh">（放着不管）越放越坏</div><div class="note">本义是伤口化脓溃烂。这一段是 Schneier 的话。</div></div>
+<div class="entry"><div class="en">make them proud</div><div class="loc" data-p="66">… We should try to make them proud.</div><div class="zh">让他们为我们骄傲</div><div class="note">them 指上一段里将来回头评判我们的孙辈。</div></div>
+
+<h3 class="sec-head" id="s2.6">§2.6 <span class="first">Legislation and Self-Regulation</span></h3>
+<div class="entry trap"><div class="en">run counter to</div><div class="loc" data-p="68">… runs directly counter to the philosophy …</div><div class="zh">和……正相反</div><div class="note">不是「跑向柜台」。counter 作副词是「相反地」。</div></div>
+<div class="entry"><div class="en">to some extent</div><div class="loc" data-p="69">… To some extent, that opposition is justified.</div><div class="zh">在一定程度上</div><div class="note">作者在这里做了让步：监管也有代价。</div></div>
+<div class="entry trap"><div class="en">take it upon oneself</div><div class="loc" data-p="70">… we should take it upon ourselves …</div><div class="zh">主动承担起（某事）</div></div>
+<div class="entry trap"><div class="en">keep someone in the dark</div><div class="loc" data-p="70">… rather than keeping them in the dark.</div><div class="zh">把人蒙在鼓里</div></div>
+<div class="entry"><div class="en">not doing our job</div><div class="loc" data-p="72">… we’re not doing our job.</div><div class="zh">就是失职</div><div class="note">口气很重：不考虑社会影响，不算尽到工程师的本分。</div></div>
+
+<h3 class="sec-head" id="s3">§3 <span class="first">Summary</span></h3>
+<div class="entry trap"><div class="en">cover a lot of ground</div><div class="loc" data-p="73">… We have covered a lot of ground:</div><div class="zh">讲了很多内容</div><div class="note">ground 是「范围、领域」，不是地面。</div></div>
+<div class="entry"><div class="en">weigh up</div><div class="loc" data-p="74">… weighed up distributed and single-node systems, …</div><div class="zh">权衡、比较</div></div>
+
+<div class="gate"><b>到这里先停下，去读原书</b><p>下面是读完再看的：你的预测对不对、几道换成你来选的判断题、值得细读的句子和理解检查。先看了，读书时就只是在找答案。</p></div>
+
+<h2>读完：回到你的预测</h2>
+<div class="payoff" data-bet="14-a"><div class="mine"></div>
+<p>书里的答案是第三项（§1.1）。作者的论证分两步：一是别的特征常常和受保护特征高度相关，书里举的就是一个这样的代理特征，模型不需要那一列也能把人分开；二是预测模型的规则是从数据里推出来的，输入带着系统性的偏差，输出多半也会学到并放大它。第一项正是作者要反驳的那种期望：带偏见的数据进去，指望出来公平的结果。第四项也不成立：按书里的说法，偏差是系统性的，模型会学到并放大它，数据多了并不会把它平均掉。想一想：如果把训练目标从「当年录没录用」换成「入职两年后的绩效评分」，偏差就一定没了吗？绩效评分本身是谁打的？</p></div>
+<div class="payoff" data-bet="14-b"><div class="mine"></div>
+<p>书里的答案是第三项（§2.2）。书里引的 GDPR 条文要求同意是自由给出、具体、知情、明确的，用户要能拒绝或撤回而不吃亏，否则就不算自由给出。拒绝就只能退出，正是「吃亏」。第二项是作者在同一节专门驳的：一个服务要是已经成了社交、工作离不开的东西，「不用就是了」并不是真的选择。第一项也碰到作者的另一条反驳：大多数人看不懂自己的数据会被怎么用，谈不上有意义的同意。第四项说过头了，书里没有这样说。想一想：如果拒绝以后应用照常能用，只是广告不再个性化，作者在这一节提出的几条问题就都消失了吗？</p></div>
+
+<h2>判断题：换成你来选</h2>
+<p class="lede">场景都是本站编的。先选，再看解释；解释里写了对应的节号，拿不准就回原书看那一节。</p>
+<p class="quiz-score"></p>
+<div class="mcq" data-answer="1"><div class="q">这个打分方式，按书里的分析，主要问题在哪？<span class="sec">§1.2</span></div>
+  <p class="ctx">场景：一个租房平台给申请人算「可靠分」：先找出在年龄段、职业、所在街区、消费习惯上和申请人相似的一群人，再看这群人过去有多少拖欠房租。一位从没拖欠过的申请人得了低分，连续被三个房东拒绝。</p>
+  <div class="opts"><button>相似人群找得不够多，样本再大一些就准了</button><button>它按「像你的人过去怎么做」给你打分，本人记录再好也可能被分进错的组；输入多又不透明，本人很难知道错在哪、向谁申诉</button><button>问题在于申请人没有签数据收集的同意书，补签就行</button><button>没有问题：这群人平均来看确实更容易拖欠，打分在统计上是对的</button></div>
+  <div class="explain"><p>书里对比了两种打分（§1.2）：传统信用分看的是你本人过去的借贷记录，记录错了还能改；预测分析问的是和你相似的人过去怎样，等于按群体给人贴标签，难免有人被分错组；决定要是因为数据错了而出错，几乎无处申诉。第四项正是书里平均寿命那个比方要反驳的：整体分布对，不代表对某一个人的判断对。样本再大也改变不了「按群体判断个人」；同意书管的是收集，不是判断的方式。一个人被几个房东同时拒绝，也就是 §1 说的「算法监狱」的样子。</p></div></div>
+<div class="mcq" data-answer="3"><div class="q">这组数字说明了什么？<span class="sec">§1.3</span></div>
+  <p class="ctx">场景：一个公寓楼群的管理公司按「上个月记录到的违规事件数」排保安巡逻，记录多的楼栋多派人。半年后，B 栋的记录数是其他楼栋的三倍，巡逻也几乎都排在 B 栋。往回查，B 栋第一个月只是因为一次漏水多记了几条。</p>
+  <div class="opts"><button>B 栋的问题本来就多，数据如实反映了现实</button><button>这是随机波动，再等半年就会回到平均水平</button><button>按月统计样本太少，改成按年统计就好了</button><button>巡逻多的地方记录到的就多，记录多又招来更多巡逻：系统的决定改写了它自己的输入</button></div>
+  <div class="explain"><p>这是 §1.3 说的自我强化的反馈回路。记录数量反映的不只是「发生了多少」，还有「看了多少」：巡逻安排决定能看到什么，看到的又决定下一轮巡逻，一次偶然的差异被一圈圈放大。随机波动会自己回落，回路不会；按年统计只是让回路转得慢一点。书里推荐的是系统思维：把巡逻的人、住户、记录的方式都算进系统里，问它是在放大差距还是在缩小。</p></div></div>
+<div class="mcq" data-answer="0"><div class="q">哪个说法最贴近书里的分析？<span class="sec">§2.3</span></div>
+  <p class="ctx">场景：一个照片云盘应用把所有相册默认设为「仅自己可见」，宣传页上写着「你的照片只有你能看到」。隐私政策里另有一条：公司可以分析照片内容，用于改进服务和推荐。</p>
+  <div class="opts"><button>隐私设置管的是别的用户能看到什么；服务自己照样能按隐私政策处理这些照片，宣传语说的比实际多</button><button>设成仅自己可见以后，公司内部也就无权处理这些照片了</button><button>只要公司承诺不卖给第三方，用户的隐私就没有被拿走</button><button>用户点过隐私政策，所以宣传语和实际没有出入</button></div>
+  <div class="explain"><p>书里说（§2.3），隐私设置是把一部分控制权交还用户的起点，但它控制的是其他用户能看到什么；服务自己对数据的访问不受这个开关限制，在内部做的往往比用户看得见的多得多。第三项正是书里点出的：不卖给第三方，不等于不在内部分析。第四项要回到 §2.2：大多数人看不懂隐私政策，点过不等于知情。</p></div></div>
+<div class="mcq" data-answer="2"><div class="q">按书里的思路，哪一步最直接？<span class="sec">§2.6</span></div>
+  <p class="ctx">场景：一个面向欧盟用户的跑步应用，把每个用户每次跑步的原始 GPS 轨迹永久保存，理由是「以后也许能做新功能」。实际上现有功能只用到每次跑步的距离、配速和大致区域。</p>
+  <div class="opts"><button>原始轨迹全部加密，照常永久保存</button><button>去掉用户名，把原始轨迹交给合作方做研究，让数据发挥价值</button><button>只保存现有功能要用的汇总，原始轨迹用完就按期删掉</button><button>收紧内部权限，只让少数人能查原始轨迹</button></div>
+  <div class="explain"><p>书里给工程师的第一步是两件事（§2.6）：一开始就少收，不再需要就删。没有的数据，不会被偷、被泄露，也不会被要求交出去。加密和权限能挡住一部分风险，但数据还在：§2.4 列的内鬼、公司落到别有用心的管理层手里、破产后数据被当资产卖掉、将来的政府，这些风险都还在。第二项把数据用于收集时没说明的目的，和书里引的 GDPR「目的明确、不得挪作他用」相冲突；「以后也许有用」也正是书里说的大数据思路和数据最小化相冲突的地方。</p></div></div>
+
+<h2>值得停下来的句子</h2>
+<blockquote class="quote">Having privacy does not mean keeping everything secret; it means having the freedom to choose what to reveal to whom…<cite>— §2.3。本站译：拥有隐私并不意味着把一切都藏起来，而是意味着有自由去选择把什么透露给谁……</cite></blockquote>
+<p>这是作者给隐私下的定义，§2.3 和 §2.4 的论证都靠它撑着。如果隐私等于保密，那么用户自己把生活晒到网上，隐私就是自己放弃的，「隐私已死」也就说得通。换成「选择的自由」，问题就从「藏没藏」变成了「谁在决定」：数据被收走以后，决定权落到了公司手里。读后面那几段时，可以拿这个定义去对照每一个例子。</p>
+<blockquote class="quote">Data you don’t have is data that can’t be leaked, stolen, or compelled by governments to be handed over.<cite>— §2.6。本站译：你没有的数据，就不会被泄露、被偷走，也不会被政府强令交出去。</cite></blockquote>
+<p>前面几节讲的风险，到这里落成了一条工程上能做的事。它也和全书的技术部分接上了：第 4 章说 LSM 树里删掉的值可能在旧的段里留很久，第 12 章说不可变的日志里真正删除很难。既然删不干净，作者的建议是从源头少收。作者在第 1 章 §4 提过的数据最小化，到这里成了全书最后给工程师的建议之一。</p>
+
+<h2>检查一下理解</h2>
+<details class="check"><summary>1.（§0）作者为什么说伦理不是「对照清单确认合规」？</summary><p>伦理里的概念没有确定的含义，要靠解释，可能因人而异。作者认为它是一个和相关的人对话、反复反思、并对结果负责的过程，不是一次性的检查。</p></details>
+<details class="check"><summary>2.（§1）对机构来说「拿不准就拒绝」是合理的，为什么对个人就成了问题？</summary><p>机构错过一笔生意损失小，放一笔坏账损失大，所以宁可拒绝。可当许多机构都靠类似的算法，一个被标成高风险的人会在工作、保险、租房等各处同时碰到拒绝，而且没有证据、难以申诉。</p></details>
+<details class="check"><summary>3.（§1.2）平均寿命 80 岁这个例子想说明什么？</summary><p>整体的概率分布正确，不等于能判断某一个人。预测系统的输出是概率性的，具体到个人可能就是错的。</p></details>
+<details class="check"><summary>4.（§1.3）系统思维指什么？作者希望用它回答什么问题？</summary><p>把整个系统，连同和它打交道的人一起考虑，去理解它对不同的行为和特征怎么反应。要回答的是：这个系统在放大人与人之间已有的差距，还是在对抗不公。它能预见很多后果，但不是全部。</p></details>
+<details class="check"><summary>5.（§2.1）作者承认把「数据」换成「监控」的思想实验带着论战口吻，为什么还要做？</summary><p>作者认为需要用重话强调：我们已经建起了前所未有的大规模监控基础设施。把数据收集当作监控来看，不是说所有收集都是监控，而是能帮我们看清自己和数据收集者之间的关系。</p></details>
+<details class="check"><summary>6.（§2.2）在 GDPR 下，同意以外还有哪些处理个人数据的合法依据？</summary><p>书里提到遵守其他法律、保护某人的生命，以及正当利益（比如防欺诈）等。但互联网服务最常用的依据仍然是同意。</p></details>
+<details class="check"><summary>7.（§2.3）作者说隐私权在监控中没有被侵蚀，而是被转移了。转移给了谁？对方怎么用它？</summary><p>转移给了收集数据的公司。公司决定透露什么、给谁看，通常把监控的结果藏起来，只通过广告定向之类的工具间接透露用户的私密信息，目标是利润最大化。</p></details>
+<details class="check"><summary>8.（§2.6）数据最小化为什么和大数据的思路相冲突？</summary><p>GDPR 要求数据只为明确的目的收集，只收必要的部分；大数据的思路是尽量多收、和别的数据集合并、探索新的用途。探索本身就意味着用于收集时没想到的目的。</p></details>
+<p>用一句话说这一章（写给一个没读过的朋友）：</p>
+<textarea class="note" data-key="14-oneline" placeholder="比如：……"></textarea>
+
+<h2>精彩回顾</h2>
+<p class="recall-line"><b>一句话：</b>数据很多是关于人的：用它替人做决定会放大偏见，收集它会把隐私的决定权交给公司；作者要工程师为后果负责。</p>
+<div class="recall">
+  <div class="item"><b>给偏见洗钱</b><p>有人讽刺说机器学习像给偏见洗钱：带偏见的历史数据进去，出来的结论看起来客观。作者的看法是，预测只是拿过去外推。</p><span class="sec">§1.1</span></div>
+  <div class="item"><b>像你的人</b><p>信用分问你过去怎么做，预测分析问像你的人怎么做。分错了组，或者数据本身错了，几乎无处申诉。</p><span class="sec">§1.2</span></div>
+  <div class="item"><b>越陷越深</b><p>打分改变了人的处境，处境又被喂回打分。作者建议用系统思维，把和系统打交道的人也算进去。</p><span class="sec">§1.3</span></div>
+  <div class="item"><b>把数据换成监控</b><p>一个替换词的思想实验：读着不舒服的地方，就是作者想让你看到的地方。作者自己也承认这话说得重。</p><span class="sec">§2.1</span></div>
+  <div class="item"><b>不用就是了？</b><p>服务一旦成了社交和工作的基本条件，不用的代价太高；只有少数有时间、有余地的人，才真的能选。</p><span class="sec">§2.2</span></div>
+  <div class="item"><b>隐私是决定权</b><p>隐私不是什么都藏起来，而是自己决定给谁看什么。数据被收走，这个决定权就到了公司手里。</p><span class="sec">§2.3</span></div>
+  <div class="item"><b>新的铀</b><p>数据被比作有毒资产、危险品，甚至铀：收集时要想到入侵、内鬼、公司易主，还有将来的每一届政府。</p><span class="sec">§2.4</span></div>
+  <div class="item"><b>没有的数据不会泄露</b><p>作者给工程师的第一步：一开始就少收，不再需要就删，不要永久保存。</p><span class="sec">§2.6</span></div>
+</div>
+
+</main>
+</body>
+</html>

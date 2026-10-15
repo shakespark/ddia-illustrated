@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>全书术语 · DDIA 导读</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/chapters.js"></script>
+<script src="assets/sections.js"></script>
+<script src="assets/dd.js"></script>
+</head>
+<body>
+<main>
+
+<h1>全书术语</h1>
+<p class="lede">全书反复用到的术语，每个只在这里讲一次，章节页链过来。按第一次出现的章排，同一章里按出现顺序。每条给英文、本站的中文译法和本站自己写的解释（不是原书词汇表的翻译）；末尾的链接回到第一次讲它的那一章。译本的译法可能和这里不同，按英文对。</p>
+
+<h2>第 1 章起</h2>
+<div class="gloss">
+
+<div class="term" id="g-oltp"><h3><span class="en">OLTP (online transaction processing)</span>在线事务处理</h3>
+<p>按键取出少量记录，按用户的操作逐条增删改。查询是写在应用代码里的固定几种，每次只碰几行，要求延迟低。</p>
+<p class="where">第一次出现：<a href="chapters/01.html">第 1 章</a> §1.1</p></div>
+
+<div class="term" id="g-olap"><h3><span class="en">OLAP / analytics</span>联机分析处理 / 分析</h3>
+<p>一次扫过大量记录，算计数、求和、平均这类汇总，不返回单条记录。查询多是分析师临时写的，数据集从 TB 到 PB 级。</p>
+<p class="where">第一次出现：<a href="chapters/01.html">第 1 章</a> §1.1</p></div>
+
+<div class="term" id="g-data-warehouse"><h3><span class="en">data warehouse</span>数据仓库</h3>
+<p>一个单独的数据库，存公司各个业务系统数据的只读副本，专门给分析用。分析师在这里怎么查都不影响线上业务，存储方式也按分析查询优化。</p>
+<p class="where">第一次出现：<a href="chapters/01.html">第 1 章</a> §1.2</p></div>
+
+<div class="term" id="g-etl"><h3><span class="en">ETL / ELT (extract–transform–load)</span>抽取、转换、加载</h3>
+<p>把数据从业务库抽出来，转换成适合分析的模式并清洗，再加载进数据仓库。先加载、在仓库里再转换的叫 ELT。后来推广为更一般的数据管道。</p>
+<p class="where">第一次出现：<a href="chapters/01.html">第 1 章</a> §1.2</p></div>
+
+<div class="term" id="g-data-lake"><h3><span class="en">data lake</span>数据湖</h3>
+<p>集中存放可能对分析有用的数据副本，只存文件，不规定格式、数据模型和模式。比关系型存储灵活，也更便宜，数据科学家用得多。</p>
+<p class="where">第一次出现：<a href="chapters/01.html">第 1 章</a> §1.2</p></div>
+
+<div class="term" id="g-system-of-record"><h3><span class="en">system of record (source of truth)</span>记录系统（事实来源）</h3>
+<p>数据第一次写入的地方，存权威的那一份，每个事实只记一次。别的系统和它对不上时，以它为准。是不是记录系统取决于在应用里怎么用，不取决于用的是哪种数据库。</p>
+<p class="where">第一次出现：<a href="chapters/01.html">第 1 章</a> §1.3</p></div>
+
+<div class="term" id="g-derived-data"><h3><span class="en">derived data</span>派生数据</h3>
+<p>从别处已有的数据加工出来的数据，比如缓存、索引、物化视图、训练出的模型。严格说是冗余的，丢了能从源头重建，但往往是读性能离不开的。</p>
+<p class="where">第一次出现：<a href="chapters/01.html">第 1 章</a> §1.3</p></div>
+
+<div class="term" id="g-node"><h3><span class="en">node</span>节点</h3>
+<p>分布式系统里，经网络通信的每一个参与进程。</p>
+<p class="where">第一次出现：<a href="chapters/01.html">第 1 章</a> §3</p></div>
+
+<div class="term" id="g-gdpr"><h3><span class="en">GDPR (General Data Protection Regulation)</span>《通用数据保护条例》</h3>
+<p>欧盟的数据保护法规，2018 年起适用。书里多处提到它：被遗忘权给不可变日志和 LSM 树带来的删除难题，以及第 14 章引的同意、目的限定和数据最小化条文。</p>
+<p class="where">第一次出现：<a href="chapters/01.html">第 1 章</a> §4</p></div>
+
+<div class="term" id="g-data-minimization"><h3><span class="en">data minimization</span>数据最小化</h3>
+<p>只为明确的目的收集必要的数据，不挪作他用，不再需要就删。和「先多存，说不定以后有用」的大数据思路正相反。</p>
+<p class="where">第一次出现：<a href="chapters/01.html">第 1 章</a> §4</p></div>
+</div>
+
+<h2>第 2 章起</h2>
+<div class="gloss">
+
+<div class="term" id="g-fan-out"><h3><span class="en">fan-out</span>扇出</h3>
+<p>一个请求引出多少个下游请求，这个倍数叫扇出。写的时候先推好（物化）的做法，写的代价按扇出放大。</p>
+<p class="where">第一次出现：<a href="chapters/02.html">第 2 章</a> §1.2</p></div>
+
+<div class="term" id="g-percentile"><h3><span class="en">percentile</span>百分位数</h3>
+<p>把响应时间从快到慢排好，排在某个位置上的值。p50 即中位数，p99 表示一百个请求里只有一个比它慢。几台机器的百分位不能取平均，要合并直方图再算。</p>
+<p class="where">第一次出现：<a href="chapters/02.html">第 2 章</a> §2.2</p></div>
+
+<div class="term" id="g-tail-latency"><h3><span class="en">tail latency</span>尾延迟</h3>
+<p>p99、p999 这类高百分位的响应时间。一个请求要并行调很多后端时，尾延迟会被放大。</p>
+<p class="where">第一次出现：<a href="chapters/02.html">第 2 章</a> §2.2</p></div>
+
+<div class="term" id="g-slo"><h3><span class="en">SLO / SLA</span>服务水平目标 / 服务水平协议</h3>
+<p>SLO 用百分位、可用率之类的数给服务定目标；SLA 是写明没达到目标时怎么办的合同。</p>
+<p class="where">第一次出现：<a href="chapters/02.html">第 2 章</a> §2.3</p></div>
+
+<div class="term" id="g-fault-tolerance"><h3><span class="en">fault tolerance</span>容错</h3>
+<p>某些部件出故障时，系统仍然提供该提供的服务。容错总有范围：能扛住哪几类故障、扛住几个。</p>
+<p class="where">第一次出现：<a href="chapters/02.html">第 2 章</a> §3.1</p></div>
+
+<div class="term" id="g-shared-nothing"><h3><span class="en">shared-nothing architecture</span>无共享架构</h3>
+<p>多台机器各有 CPU、内存、磁盘，靠普通网络在软件层面协调，也叫横向扩展。代价是要分片，还要面对分布式系统的全部复杂性。</p>
+<p class="where">第一次出现：<a href="chapters/02.html">第 2 章</a> §4.2</p></div>
+
+</div>
+
+<h2>第 3 章起</h2>
+<div class="gloss">
+
+<div class="term" id="g-declarative-query"><h3><span class="en">declarative query language</span>声明式查询语言</h3>
+<p>只说要什么样的结果（条件、排序、分组），不说怎么算；用哪个索引、按什么顺序连接、要不要并行，由数据库的查询优化器决定。所以数据库改进了执行方式，查询不用改。</p>
+<p class="where">第一次出现：<a href="chapters/03.html">第 3 章</a> §0</p></div>
+
+<div class="term" id="g-normalization"><h3><span class="en">normalization / denormalization</span>规范化 / 反规范化</h3>
+<p>给人看的信息只存一处，别处用一个不会变的 ID 引用，叫规范化；把信息抄进每条用到它的记录，叫反规范化。前者写便宜、读时要连接，后者读快、写时要更新所有副本。</p>
+<p class="where">第一次出现：<a href="chapters/03.html">第 3 章</a> §1.2</p></div>
+
+<div class="term" id="g-schema-on-read"><h3><span class="en">schema-on-read / schema-on-write</span>读时模式 / 写时模式</h3>
+<p>数据库不检查数据结构，由读数据的代码假定并解释结构，叫读时模式；数据库在写入时保证数据符合显式的模式，叫写时模式。书里拿它类比动态和静态类型检查。</p>
+<p class="where">第一次出现：<a href="chapters/03.html">第 3 章</a> §1.5</p></div>
+
+<div class="term" id="g-event-sourcing"><h3><span class="en">event sourcing</span>事件溯源</h3>
+<p>把每一次状态变化记成一条不可变、用过去时命名的事件，追加到日志里，日志是唯一的事实来源；读用从日志派生的物化视图。把写的表示和读的表示分开的原则叫 CQRS。</p>
+<p class="where">第一次出现：<a href="chapters/03.html">第 3 章</a> §3</p></div>
+
+<div class="term" id="g-materialized-view"><h3><span class="en">materialized view</span>物化视图</h3>
+<p>预先算好、存下来的查询结果，读得快，代价是源数据变了要去更新它。事件溯源里也叫投影或读模型。</p>
+<p class="where">第一次出现：<a href="chapters/03.html">第 3 章</a> §1.2</p></div>
+
+</div>
+
+<h2>第 4 章起</h2>
+<div class="gloss">
+
+<div class="term" id="g-log"><h3><span class="en">log</span>日志</h3>
+<p>只能往末尾追加的一串记录。书里说的日志不是程序打印给人看的那种，而是数据库内部的数据结构：预写日志、LSM 树的段、复制日志、消息队列，都是它。全书反复回到这个结构，因为追加写最快、最容易在崩溃后恢复，也最容易被别人按顺序读走。</p>
+<p class="where">第一次出现：<a href="chapters/04.html">第 4 章</a> §1</p></div>
+
+<div class="term" id="g-lsm-tree"><h3><span class="en">LSM-tree</span>LSM 树（日志结构合并树）</h3>
+<p>一类存储引擎：写先进内存里的有序表，满了整个写成不可变的有序文件（段），后台不断把段合并，丢掉旧值和已删除的值。写入是成片的顺序写，适合写多的负载；读可能要查好几个段，靠布隆过滤器少读一些。</p>
+<p class="where">第一次出现：<a href="chapters/04.html">第 4 章</a> §1.1</p></div>
+
+<div class="term" id="g-compaction"><h3><span class="en">compaction</span>合并（压实）</h3>
+<p>在后台把几个文件合成一个新文件，同一个键只留最新的值，删掉的值和墓碑一起扔掉。LSM 树靠它回收空间、减少读时要查的文件数；代价是要占磁盘带宽，写入太快时可能跟不上。</p>
+<p class="where">第一次出现：<a href="chapters/04.html">第 4 章</a> §1.1</p></div>
+
+<div class="term" id="g-b-tree"><h3><span class="en">B-tree</span>B 树</h3>
+<p>把磁盘分成固定大小的页，页里存一串有序的键和指向下层页的页号，组成一棵很矮的平衡树。改数据就覆盖写那一页；页满了就分裂。几乎所有关系数据库都用它做索引，读的性能稳定。</p>
+<p class="where">第一次出现：<a href="chapters/04.html">第 4 章</a> §1.2</p></div>
+
+<div class="term" id="g-wal"><h3><span class="en">write-ahead log (WAL)</span>预写日志</h3>
+<p>改数据之前，先把「要改什么」追加写进一个日志并刷到盘上，然后才去改真正的数据结构。崩溃后按日志重做，就能回到一致的状态。B 树用它防页分裂改到一半；后面几章的复制、事务也会用到它。</p>
+<p class="where">第一次出现：<a href="chapters/04.html">第 4 章</a> §1.2</p></div>
+
+<div class="term" id="g-write-amplification"><h3><span class="en">write amplification</span>写放大</h3>
+<p>一次应用层的写，在磁盘上变成了好几次写：日志一次、数据页或段一次、每次合并再一次。用实际写盘的字节数除以「只追加、不建索引」要写的字节数来衡量。写放大越高，同样的磁盘带宽能扛的写越少，SSD 也磨损得越快。</p>
+<p class="where">第一次出现：<a href="chapters/04.html">第 4 章</a> §1.3</p></div>
+
+<div class="term" id="g-column-storage"><h3><span class="en">column-oriented storage</span>列式存储</h3>
+<p>把一张表每一列的值存在一起，而不是把每一行的值存在一起。分析查询通常只用几列、却要扫很多行，列存只读需要的列，同一列的值又很好压缩。各列靠「第 k 个值属于第 k 行」对上。</p>
+<p class="where">第一次出现：<a href="chapters/04.html">第 4 章</a> §2.2</p></div>
+
+</div>
+
+<h2>第 5 章起</h2>
+<div class="gloss">
+
+<div class="term" id="g-rolling-upgrade"><h3><span class="en">rolling upgrade</span>滚动升级</h3>
+<p>一次只给几个节点换新版本，确认没问题再换下一批，全程不停服。换完之前，新旧版本的代码同时在线，所以数据要两个方向都兼容。</p>
+<p class="where">第一次出现：<a href="chapters/05.html">第 5 章</a> §0</p></div>
+
+<div class="term" id="g-backward-compatibility"><h3><span class="en">backward compatibility</span>向后兼容</h3>
+<p>新代码能读旧代码写的数据。写新代码的人知道旧格式，一般不难做到。</p>
+<p class="where">第一次出现：<a href="chapters/05.html">第 5 章</a> §0</p></div>
+
+<div class="term" id="g-forward-compatibility"><h3><span class="en">forward compatibility</span>向前兼容</h3>
+<p>旧代码能读新代码写的数据。旧代码要跳过不认识的字段；读出来改完再写回时，还要把这些字段原样带上，否则会写丢。</p>
+<p class="where">第一次出现：<a href="chapters/05.html">第 5 章</a> §0</p></div>
+
+<div class="term" id="g-schema-evolution"><h3><span class="en">schema evolution</span>模式演化</h3>
+<p>模式随时间改变（加字段、删字段、改名、改类型），同时保持向后和向前兼容。Protocol Buffers 靠标签号的规矩做到，Avro 靠写者模式、读者模式和默认值做到。</p>
+<p class="where">第一次出现：<a href="chapters/05.html">第 5 章</a> §1.3</p></div>
+
+<div class="term" id="g-rpc"><h3><span class="en">remote procedure call (RPC)</span>远程过程调用</h3>
+<p>想让一次网络请求看起来和调用本地函数一样。网络请求会超时、会重复、延迟忽高忽低，所以作者认为这种「位置透明」的抽象有根本缺陷。</p>
+<p class="where">第一次出现：<a href="chapters/05.html">第 5 章</a> §2.2</p></div>
+
+<div class="term" id="g-idempotence"><h3><span class="en">idempotence</span>幂等</h3>
+<p>同一个操作做一次和做多次，结果一样。请求超时后不知道对方做没做，只有操作幂等，重试才安全。</p>
+<p class="where">第一次出现：<a href="chapters/05.html">第 5 章</a> §2.2</p></div>
+
+<div class="term" id="g-message-broker"><h3><span class="en">message broker</span>消息代理</h3>
+<p>发送方和接收方之间暂存消息的中间件。它能做缓冲、能重新投递、能一条消息发给多个接收方，还让发送方不用知道接收方的地址。</p>
+<p class="where">第一次出现：<a href="chapters/05.html">第 5 章</a> §2.4</p></div>
+
+</div>
+
+<h2>第 6 章起</h2>
+<div class="gloss">
+
+<div class="term" id="g-failover"><h3><span class="en">failover</span>故障切换</h3>
+<p>主库坏了，把一个从库提升为新主库，再让客户端和其他从库改认它。分三步：判定主库死亡（通常靠超时）、选新主库、重新配置。超时太长恢复慢，太短会误切换。</p>
+<p class="where">第一次出现：<a href="chapters/06.html">第 6 章</a> §1.3</p></div>
+
+<div class="term" id="g-split-brain"><h3><span class="en">split brain</span>脑裂</h3>
+<p>两个节点都以为自己是主库，同时接受写入。没有冲突解决机制时，数据会丢失或损坏。防止的办法是限制或关掉旧主库（fencing）。</p>
+<p class="where">第一次出现：<a href="chapters/06.html">第 6 章</a> §1.3</p></div>
+
+<div class="term" id="g-replication-lag"><h3><span class="en">replication lag</span>复制延迟</h3>
+<p>一次写在主库生效，到它在从库上可见，中间隔的时间。平时不到一秒，负载高或网络出问题时可能到几秒甚至几分钟。</p>
+<p class="where">第一次出现：<a href="chapters/06.html">第 6 章</a> §1.5</p></div>
+
+<div class="term" id="g-eventual-consistency"><h3><span class="en">eventual consistency</span>最终一致性</h3>
+<p>停止写入、等足够久以后，各副本终究会一致。「终究」是多久没有上限，这是刻意说得含糊的。</p>
+<p class="where">第一次出现：<a href="chapters/06.html">第 6 章</a> §1.5</p></div>
+
+<div class="term" id="g-read-your-writes"><h3><span class="en">read-after-write (read-your-writes) consistency</span>读己之写一致性</h3>
+<p>用户总能读到自己提交过的改动，对别人的改动不作承诺。常见实现：可能被自己改过的数据从主库读；或者记住自己最后一次写的位置，只读已经追上这个位置的副本。</p>
+<p class="where">第一次出现：<a href="chapters/06.html">第 6 章</a> §1.5</p></div>
+
+<div class="term" id="g-monotonic-reads"><h3><span class="en">monotonic reads</span>单调读</h3>
+<p>同一个用户连续读，不会先读到新数据、再读到更旧的。比强一致弱，比最终一致强。常见做法是让同一个用户固定读同一个副本。</p>
+<p class="where">第一次出现：<a href="chapters/06.html">第 6 章</a> §1.5</p></div>
+
+<div class="term" id="g-lww"><h3><span class="en">last write wins (LWW)</span>最后写入者胜</h3>
+<p>冲突时留下时间戳最大的值，其余悄悄丢掉。并发的写本来就没有先后，所以实际上等于随机挑一个；用实时时钟时还会被时钟偏差影响。</p>
+<p class="where">第一次出现：<a href="chapters/06.html">第 6 章</a> §2.3</p></div>
+
+<div class="term" id="g-crdt"><h3><span class="en">conflict-free replicated datatype (CRDT)</span>无冲突复制数据类型</h3>
+<p>能把并发修改自动合并的数据结构，各副本处理过同一组写之后，不管到达顺序如何都收敛到同一状态。文本、列表、计数器、键值映射都有对应的实现。</p>
+<p class="where">第一次出现：<a href="chapters/06.html">第 6 章</a> §2.3</p></div>
+
+<div class="term" id="g-quorum"><h3><span class="en">quorum</span>法定人数</h3>
+<p>读和写各要多少个副本回应才算成功。n 个副本、写等 w 个、读等 r 个，w + r > n 时读和写的集合至少重叠一个副本。不一定非得是多数。</p>
+<p class="where">第一次出现：<a href="chapters/06.html">第 6 章</a> §3.1</p></div>
+
+<div class="term" id="g-version-vector"><h3><span class="en">version vector</span>版本向量</h3>
+<p>每个副本一个版本号，合在一起用来判断两次写是先后关系还是并发。读的时候发给客户端，写的时候带回来。和向量时钟（vector clock）相近，但不完全一样。</p>
+<p class="where">第一次出现：<a href="chapters/06.html">第 6 章</a> §3.4</p></div>
+
+</div>
+
+<h2>第 7 章起</h2>
+<div class="gloss">
+
+<div class="term" id="g-shard"><h3><span class="en">shard / partition</span>分片（分区）</h3>
+<p>数据切出来的一块，每条记录只属于一个分片，每个分片放在一台或几台机器上。分片通常和复制一起用：一条记录只属于一个分片，但这个分片可以有好几份副本。各系统叫法不同（partition、range、region、tablet、vnode……）。</p>
+<p class="where">第一次出现：<a href="chapters/07.html">第 7 章</a> §0</p></div>
+
+<div class="term" id="g-partition-key"><h3><span class="en">partition key</span>分区键</h3>
+<p>决定一条记录进哪个分片的那个键或那一列，不一定是主键。知道分区键的查询只用去一个分片；不知道的就要问遍所有分片。</p>
+<p class="where">第一次出现：<a href="chapters/07.html">第 7 章</a> §1</p></div>
+
+<div class="term" id="g-rebalancing"><h3><span class="en">rebalancing</span>再平衡</h3>
+<p>加减机器或出现热点以后，把分片和负载在机器之间重新摊匀。代价是要在网络上搬大量数据，搬的同时还得照常处理读写。</p>
+<p class="where">第一次出现：<a href="chapters/07.html">第 7 章</a> §3</p></div>
+
+<div class="term" id="g-skew"><h3><span class="en">skew / hot spot</span>倾斜 / 热点</h3>
+<p>有的分片数据或请求远多于其他分片，叫倾斜；负载特别高的那个分片叫热点。单个键特别热的叫热键，换哪种分片方案都只落在一个分片上。</p>
+<p class="where">第一次出现：<a href="chapters/07.html">第 7 章</a> §3</p></div>
+
+<div class="term" id="g-consistent-hashing"><h3><span class="en">consistent hashing</span>一致性哈希</h3>
+<p>一类把键映射到分片的算法：各分片分到的键大致一样多，分片数变化时只搬最少的键。这里的「一致」和副本一致性、ACID 的一致性都没有关系。</p>
+<p class="where">第一次出现：<a href="chapters/07.html">第 7 章</a> §3.2</p></div>
+
+</div>
+
+<h2>第 8 章起</h2>
+<div class="gloss">
+
+<div class="term" id="g-transaction"><h3><span class="en">transaction</span>事务</h3>
+<p>把一组读写当成一个逻辑整体：要么全部提交，要么全部中止、像没发生过一样，出了错应用可以放心重试。</p>
+<p class="where">第一次出现：<a href="chapters/08.html">第 8 章</a> §1</p></div>
+
+<div class="term" id="g-acid"><h3><span class="en">ACID</span>ACID</h3>
+<p>原子性、一致性、隔离性、持久性的缩写，描述事务的安全保证。原子性指出错时整个中止，一致性指应用定义的不变式；各家实现差别大，作者说它如今多半是营销用语。</p>
+<p class="where">第一次出现：<a href="chapters/08.html">第 8 章</a> §1.1</p></div>
+
+<div class="term" id="g-snapshot-isolation"><h3><span class="en">snapshot isolation</span>快照隔离</h3>
+<p>每个事务从开始那一刻的一致快照里读，看不到之后别人提交的写；通常用多版本实现，读不挡写、写不挡读。挡得住读偏斜，挡不住写偏斜。</p>
+<p class="where">第一次出现：<a href="chapters/08.html">第 8 章</a> §2.2</p></div>
+
+<div class="term" id="g-mvcc"><h3><span class="en">multiversion concurrency control (MVCC)</span>多版本并发控制</h3>
+<p>一行同时保留几个版本，每个版本标着创建和删除它的事务号，读的事务按可见性规则挑自己该看的那个。快照隔离最常见的实现。</p>
+<p class="where">第一次出现：<a href="chapters/08.html">第 8 章</a> §2.2</p></div>
+
+<div class="term" id="g-write-skew"><h3><span class="en">write skew</span>写偏斜</h3>
+<p>两个事务读同一批数据，按读到的前提各自写入（往往是不同的行），写完后前提已不成立。快照隔离挡不住，只有可串行化能自动防止。</p>
+<p class="where">第一次出现：<a href="chapters/08.html">第 8 章</a> §2.4</p></div>
+
+<div class="term" id="g-serializability"><h3><span class="en">serializability</span>可串行化</h3>
+<p>最强的隔离级别：并发执行的结果和某种一个接一个执行的结果相同，因而防得住所有竞争。实现有真串行执行、两阶段锁、SSI 三种。和线性一致性不是一回事。</p>
+<p class="where">第一次出现：<a href="chapters/08.html">第 8 章</a> §3</p></div>
+
+<div class="term" id="g-2pl"><h3><span class="en">two-phase locking (2PL)</span>两阶段锁</h3>
+<p>读拿共享锁、写拿排他锁、锁一直持有到事务结束的可串行化实现，用谓词锁或索引范围锁防幻读。读写互相阻塞，延迟不稳定。别和两阶段提交混淆。</p>
+<p class="where">第一次出现：<a href="chapters/08.html">第 8 章</a> §3.2</p></div>
+
+<div class="term" id="g-ssi"><h3><span class="en">serializable snapshot isolation (SSI)</span>可串行化快照隔离</h3>
+<p>在快照隔离上加冲突检测的乐观算法：事务照常执行、不因冲突等待，提交时如果发现自己读到的前提已被别人提交的写改掉，就中止。只读事务不受影响。</p>
+<p class="where">第一次出现：<a href="chapters/08.html">第 8 章</a> §3.3</p></div>
+
+<div class="term" id="g-2pc"><h3><span class="en">two-phase commit (2PC)</span>两阶段提交</h3>
+<p>让多个节点对一个事务要么都提交、要么都中止的协议：协调者先问所有参与者能否提交，全部答「是」才把提交的决定写进日志再通知大家。协调者崩溃时，答过「是」的参与者只能持锁等待。</p>
+<p class="where">第一次出现：<a href="chapters/08.html">第 8 章</a> §4.1</p></div>
+
+</div>
+
+<h2>第 9 章起</h2>
+<div class="gloss">
+
+<div class="term" id="g-partial-failure"><h3><span class="en">partial failure</span>部分失效</h3>
+<p>系统的一部分坏了，其余照常工作，而且常常说不清坏没坏、坏在哪。单机被设计成「要么好、要么全坏」，分布式系统做不到这一点，只能在软件里去容忍。</p>
+<p class="where">第一次出现：<a href="chapters/09.html">第 9 章</a> §1</p></div>
+
+<div class="term" id="g-monotonic-clock"><h3><span class="en">monotonic clock</span>单调时钟</h3>
+<p>保证只往前走的时钟，两次读数的差就是经过的时间，用来测超时和耗时。它的绝对值没有意义，不同机器之间的读数不能拿来比。</p>
+<p class="where">第一次出现：<a href="chapters/09.html">第 9 章</a> §3.1</p></div>
+
+<div class="term" id="g-lease"><h3><span class="en">lease</span>租约</h3>
+<p>带过期时间的锁。持有者要定期续约；它崩溃或停顿后不再续，租约自然过期，别人可以接手。</p>
+<p class="where">第一次出现：<a href="chapters/09.html">第 9 章</a> §3.4</p></div>
+
+<div class="term" id="g-fencing-token"><h3><span class="en">fencing token</span>防护令牌</h3>
+<p>锁服务每授予一次锁或租约就递增的数字。客户端写的时候带上它，存储拒绝比已见最大值小的令牌，这样过期的持有者（僵尸）就写不进去。</p>
+<p class="where">第一次出现：<a href="chapters/09.html">第 9 章</a> §4.2</p></div>
+
+<div class="term" id="g-byzantine-fault"><h3><span class="en">Byzantine fault</span>拜占庭故障</h3>
+<p>节点不按协议行事，甚至故意撒谎，比如在同一次选举里投出互相矛盾的票。本书默认节点不可靠但诚实，不防这一类。</p>
+<p class="where">第一次出现：<a href="chapters/09.html">第 9 章</a> §4.3</p></div>
+
+<div class="term" id="g-system-model"><h3><span class="en">system model</span>系统模型</h3>
+<p>把算法对网络延迟、进程停顿、时钟误差和节点故障的假设写下来。时间方面有同步、部分同步、异步，故障方面有崩溃-停止、崩溃-恢复、拜占庭等。</p>
+<p class="where">第一次出现：<a href="chapters/09.html">第 9 章</a> §4.4</p></div>
+
+<div class="term" id="g-safety-liveness"><h3><span class="en">safety / liveness</span>安全性 / 活性</h3>
+<p>两类正确性质。安全性是「坏事不发生」，一旦违反能指出是哪一刻、无法挽回；活性是「好事终会发生」，此刻没做到将来还有希望。</p>
+<p class="where">第一次出现：<a href="chapters/09.html">第 9 章</a> §4.4</p></div>
+
+</div>
+
+<h2>第 10 章起</h2>
+<div class="gloss">
+
+<div class="term" id="g-linearizability"><h3><span class="en">linearizability</span>线性一致性</h3>
+<p>多副本对外表现得像只有一份数据。每个操作在请求发出到收到响应之间的某一刻原子地生效；一旦有人读到新值，此后开始的读都不能再读到旧值。它只管单个对象，和管事务的可串行化是两回事。</p>
+<p class="where">第一次出现：<a href="chapters/10.html">第 10 章</a> §1</p></div>
+
+<div class="term" id="g-cap-theorem"><h3><span class="en">CAP theorem</span>CAP 定理</h3>
+<p>网络分区时，系统只能在线性一致和可用之间选一个。它只考虑一种一致性模型和一种故障，书里认为它如今基本只有历史意义。</p>
+<p class="where">第一次出现：<a href="chapters/10.html">第 10 章</a> §1.4</p></div>
+
+<div class="term" id="g-logical-clock"><h3><span class="en">logical clock</span>逻辑时钟</h3>
+<p>一种数事件的算法，不报几点钟，只能用来比先后。它的时间戳和因果一致：先发生的时间戳更小。</p>
+<p class="where">第一次出现：<a href="chapters/10.html">第 10 章</a> §2.1</p></div>
+
+<div class="term" id="g-lamport-timestamp"><h3><span class="en">Lamport timestamp</span>Lamport 时间戳</h3>
+<p>写成（计数, 节点 ID）。每产生一个时间戳计数加一，看到更大的计数就把自己的抬上去。它给出一个和因果一致的全序，但分不出两个事件是否并发，也不保证线性一致。</p>
+<p class="where">第一次出现：<a href="chapters/10.html">第 10 章</a> §2.1</p></div>
+
+<div class="term" id="g-hybrid-logical-clock"><h3><span class="en">hybrid logical clock</span>混合逻辑时钟</h3>
+<p>计数按物理时间走，又像 Lamport 时钟那样看到更大的时间戳就跟着往前拨。它的时间戳近似挂钟时间，顺序又和因果一致；书里举的例子是 CockroachDB。</p>
+<p class="where">第一次出现：<a href="chapters/10.html">第 10 章</a> §2.1</p></div>
+
+<div class="term" id="g-consensus"><h3><span class="en">consensus</span>共识</h3>
+<p>让多个节点就一个值达成一致，决定了就不再改。比较并设置（CAS）、锁、唯一约束、共享日志、原子提交都可以归约成共识，彼此等价。</p>
+<p class="where">第一次出现：<a href="chapters/10.html">第 10 章</a> §3</p></div>
+
+<div class="term" id="g-total-order-broadcast"><h3><span class="en">shared log / total order broadcast</span>共享日志 / 全序广播</h3>
+<p>多个节点都能请求追加条目，所有节点按同一顺序读到这些条目。它和共识等价，多数共识系统提供的就是它。</p>
+<p class="where">第一次出现：<a href="chapters/10.html">第 10 章</a> §3.1</p></div>
+
+<div class="term" id="g-epoch-number"><h3><span class="en">epoch number</span>任期号</h3>
+<p>每次选主时递增的编号，Paxos 叫 ballot number，Raft 叫 term。共识算法只保证同一个任期里最多一个主，任期号大的主说了算。</p>
+<p class="where">第一次出现：<a href="chapters/10.html">第 10 章</a> §3.2</p></div>
+
+<div class="term" id="g-coordination-service"><h3><span class="en">coordination service</span>协调服务</h3>
+<p>ZooKeeper、etcd、Consul 这一类，用共识算法存少量变化慢的协调数据。它提供锁、租约、防护令牌、故障检测和变更通知。</p>
+<p class="where">第一次出现：<a href="chapters/10.html">第 10 章</a> §3.3</p></div>
+
+</div>
+
+<h2>第 11 章起</h2>
+<div class="gloss">
+
+<div class="term" id="g-batch-processing"><h3><span class="en">batch processing</span>批处理</h3>
+<p>读一批只读的、大小有限的输入，每次从头生成输出，不改输入，也不往外部系统写。主要看吞吐量，不看响应时间；输出错了可以删掉重跑。</p>
+<p class="where">第一次出现：<a href="chapters/11.html">第 11 章</a> §0</p></div>
+
+<div class="term" id="g-mapreduce"><h3><span class="en">MapReduce</span>MapReduce</h3>
+<p>一种批处理编程模型：用户只写 mapper（从每条记录里取出键和值）和 reducer（处理同一个键的全部值）两个函数，中间按键排序和分组由框架完成。2004 年由 Google 发表，现在基本被数据流引擎取代。</p>
+<p class="where">第一次出现：<a href="chapters/11.html">第 11 章</a> §0</p></div>
+
+<div class="term" id="g-dataflow-engine"><h3><span class="en">dataflow engine</span>数据流引擎</h3>
+<p>把一整条多阶段的工作流当作一个作业来执行的批处理引擎，比如 Spark、Flink。只在需要的地方排序，中间结果放在内存或本地盘，下游不必等上游全部跑完。</p>
+<p class="where">第一次出现：<a href="chapters/11.html">第 11 章</a> §3.2</p></div>
+
+<div class="term" id="g-shuffle"><h3><span class="en">shuffle</span>洗牌</h3>
+<p>批处理里的分布式排序：按键的哈希把上游的输出分给下游各个任务，在各任务内排好序，保证同一个键落到同一个任务、而且挨在一起。连接和分组都靠它；结果是有序的，不是随机的。</p>
+<p class="where">第一次出现：<a href="chapters/11.html">第 11 章</a> §3.3</p></div>
+
+</div>
+
+<h2>第 12 章起</h2>
+<div class="gloss">
+
+<div class="term" id="g-cdc"><h3><span class="en">change data capture (CDC)</span>变更数据捕获</h3>
+<p>把写进数据库的每一个变更从复制日志里取出来，按提交顺序作为一条流交给搜索索引、缓存、数据仓库这类派生系统。这样数据库就成了主，其他系统都是它的从。</p>
+<p class="where">第一次出现：<a href="chapters/12.html">第 12 章</a> §2.2</p></div>
+
+</div>
+
+<h2>第 13 章起</h2>
+<div class="gloss">
+
+<div class="term" id="g-exactly-once"><h3><span class="en">exactly-once semantics</span>恰好一次语义</h3>
+<p>处理消息时出了故障要重试，最终效果仍和没出故障时一样：不丢，也不生效两次。常靠原子提交，或靠幂等加去重来实现。它只管系统自己那一段，用户端的重复提交还得端到端去重。</p>
+<p class="where">第一次出现：<a href="chapters/13.html">第 13 章</a> §3.1</p></div>
+
+<div class="term" id="g-end-to-end"><h3><span class="en">end-to-end argument</span>端到端论证</h3>
+<p>Saltzer、Reed、Clark 1984 年提出：有些功能（去重、完整性校验、加密）只有通信两端的应用才能完整、正确地实现。底层提供的版本有用，能降低出事的概率，但单靠它不够。</p>
+<p class="where">第一次出现：<a href="chapters/13.html">第 13 章</a> §3.1</p></div>
+
+</div>
+
+</main>
+</body>
+</html>
